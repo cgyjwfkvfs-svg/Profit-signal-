@@ -402,11 +402,13 @@ def tg_format_signal(sig: "Signal", tier: str = "", mode: str = "SMC") -> str:
     spread_d   = round(get_spread(sig.symbol), dec)
 
     mode_badge = {
-        "AMD"    : "🔮 AMD — Accumulation·Manipulation·Distribution",
-        "SEPTUPLE": "⚡ SEPTUPLE TRACTION H4",
-        "SD"     : "🏛️ SUPPLY & DEMAND ZONE",
-        "SMC"    : "📊 SMC — Structure · FVG · OB",
-        "PRE-BOS": "⚠️ PRE-BOS — Avant cassure",
+        "AMD"      : "🔮 AMD — Accumulation·Manipulation·Distribution",
+        "SEPTUPLE" : "⚡ SEPTUPLE TRACTION H4",
+        "SD"       : "🏛️ SUPPLY & DEMAND ZONE",
+        "SMC"      : "📊 SMC — Structure · FVG · OB",
+        "PRE-BOS"  : "⚠️ PRE-BOS — Avant cassure",
+        "PATTERN"  : "📐 CHART PATTERN",
+        "OB_RETEST": "🔁 OB RETEST",
     }.get(mode, "📊 SMC")
 
     msg = (
@@ -1310,6 +1312,300 @@ def detect_breaker_blocks(df: pd.DataFrame, bos_list: list[dict]) -> list[dict]:
     return breakers
 
 
+# ═════════════════════════════════════════════════════════════
+#  CHART PATTERNS DETECTION  (Images 1 & 2)
+#
+#  Bullish Continuation  : Ascending Triangle · Bull Flag · Bull Wedge · Sym Triangle
+#  Bearish Continuation  : Descending Triangle · Bear Flag · Bear Wedge · Sym Triangle
+#  Bullish Reversal      : Double Bottom · Triple Bottom · Inverted H&S · Falling Wedge
+#  Bearish Reversal      : Double Top   · Triple Top    · H&S           · Rising Wedge
+#
+#  OB Retest (3 types)   : Continuation Pattern · Consolidation · BSL/PDL Retest
+# ═════════════════════════════════════════════════════════════
+
+@dataclass
+class PatternResult:
+    detected:      bool
+    pattern_name:  str
+    direction:     str   # "LONG" | "SHORT"
+    score_bonus:   int
+    description:   str
+
+
+@dataclass
+class OBRetestResult:
+    detected:     bool
+    retest_type:  str    # "continuation" | "consolidation" | "bsl_retest"
+    direction:    str
+    score_bonus:  int
+    description:  str
+
+
+def _swing_points(df: pd.DataFrame, col_high: bool = True) -> list[tuple[int, float]]:
+    """Retourne les swing highs ou lows (index, valeur)."""
+    result = []
+    col = "high" if col_high else "low"
+    for i in range(1, len(df) - 1):
+        v  = df[col].iloc[i]
+        v1 = df[col].iloc[i - 1]
+        v2 = df[col].iloc[i + 1]
+        if col_high and v > v1 and v > v2:
+            result.append((i, v))
+        elif not col_high and v < v1 and v < v2:
+            result.append((i, v))
+    return result
+
+
+def detect_double_top_bottom(df: pd.DataFrame, direction: str) -> PatternResult:
+    """Double Top (SHORT) / Double Bottom (LONG)."""
+    empty = PatternResult(False, "", direction, 0, "")
+    if len(df) < 30:
+        return empty
+    window = df.iloc[-50:]
+    atr = (window["high"] - window["low"]).rolling(14).mean().iloc[-1]
+    tol = atr * 1.5
+    if direction == "SHORT":
+        pts = _swing_points(window, col_high=True)
+        for i in range(len(pts) - 1, 0, -1):
+            idx1, h1 = pts[i]
+            for j in range(i - 1, max(i - 8, 0), -1):
+                idx2, h2 = pts[j]
+                if abs(h1 - h2) < tol and (idx1 - idx2) >= 5:
+                    neckline = window["low"].iloc[idx2:idx1].min()
+                    if window["close"].iloc[-1] < neckline + atr * 0.5:
+                        return PatternResult(True, "Double Top", "SHORT", 18,
+                            f"Double Top @ {round((h1+h2)/2,5)} | Neckline {round(neckline,5)}")
+    else:
+        pts = _swing_points(window, col_high=False)
+        for i in range(len(pts) - 1, 0, -1):
+            idx1, l1 = pts[i]
+            for j in range(i - 1, max(i - 8, 0), -1):
+                idx2, l2 = pts[j]
+                if abs(l1 - l2) < tol and (idx1 - idx2) >= 5:
+                    neckline = window["high"].iloc[idx2:idx1].max()
+                    if window["close"].iloc[-1] > neckline - atr * 0.5:
+                        return PatternResult(True, "Double Bottom", "LONG", 18,
+                            f"Double Bottom @ {round((l1+l2)/2,5)} | Neckline {round(neckline,5)}")
+    return empty
+
+
+def detect_triple_top_bottom(df: pd.DataFrame, direction: str) -> PatternResult:
+    """Triple Top (SHORT) / Triple Bottom (LONG)."""
+    empty = PatternResult(False, "", direction, 0, "")
+    if len(df) < 40:
+        return empty
+    window = df.iloc[-60:]
+    atr = (window["high"] - window["low"]).rolling(14).mean().iloc[-1]
+    tol = atr * 1.5
+    if direction == "SHORT":
+        pts = _swing_points(window, col_high=True)
+        for i in range(len(pts) - 1, 1, -1):
+            idx1, h1 = pts[i]
+            for j in range(i - 1, max(i - 6, 1), -1):
+                idx2, h2 = pts[j]
+                if abs(h1 - h2) > tol:
+                    continue
+                for k in range(j - 1, max(j - 6, 0), -1):
+                    idx3, h3 = pts[k]
+                    if abs(h1 - h3) < tol and (idx2 - idx3) >= 4:
+                        neckline = window["low"].iloc[idx3:idx1].min()
+                        if window["close"].iloc[-1] < neckline + atr * 0.5:
+                            return PatternResult(True, "Triple Top", "SHORT", 22,
+                                f"Triple Top @ {round((h1+h2+h3)/3,5)}")
+    else:
+        pts = _swing_points(window, col_high=False)
+        for i in range(len(pts) - 1, 1, -1):
+            idx1, l1 = pts[i]
+            for j in range(i - 1, max(i - 6, 1), -1):
+                idx2, l2 = pts[j]
+                if abs(l1 - l2) > tol:
+                    continue
+                for k in range(j - 1, max(j - 6, 0), -1):
+                    idx3, l3 = pts[k]
+                    if abs(l1 - l3) < tol and (idx2 - idx3) >= 4:
+                        neckline = window["high"].iloc[idx3:idx1].max()
+                        if window["close"].iloc[-1] > neckline - atr * 0.5:
+                            return PatternResult(True, "Triple Bottom", "LONG", 22,
+                                f"Triple Bottom @ {round((l1+l2+l3)/3,5)}")
+    return empty
+
+
+def detect_head_shoulders(df: pd.DataFrame, direction: str) -> PatternResult:
+    """Head & Shoulders (SHORT) / Inverted H&S (LONG)."""
+    empty = PatternResult(False, "", direction, 0, "")
+    if len(df) < 40:
+        return empty
+    window = df.iloc[-60:]
+    atr = (window["high"] - window["low"]).rolling(14).mean().iloc[-1]
+    if direction == "SHORT":
+        pts = _swing_points(window, col_high=True)
+        if len(pts) < 3:
+            return empty
+        for i in range(len(pts) - 1, 1, -1):
+            idx_r, h_r = pts[i]
+            idx_h, h_h = pts[i - 1]
+            idx_l, h_l = pts[i - 2]
+            if (h_h > h_r and h_h > h_l
+                    and abs(h_r - h_l) < atr * 2.5
+                    and (idx_h - idx_l) >= 4 and (idx_r - idx_h) >= 4):
+                neckline = window["low"].iloc[idx_l:idx_r].min()
+                if window["close"].iloc[-1] < neckline + atr:
+                    return PatternResult(True, "Head & Shoulders", "SHORT", 25,
+                        f"H&S tête={round(h_h,5)} épaules≈{round((h_l+h_r)/2,5)}")
+    else:
+        pts = _swing_points(window, col_high=False)
+        if len(pts) < 3:
+            return empty
+        for i in range(len(pts) - 1, 1, -1):
+            idx_r, l_r = pts[i]
+            idx_h, l_h = pts[i - 1]
+            idx_l, l_l = pts[i - 2]
+            if (l_h < l_r and l_h < l_l
+                    and abs(l_r - l_l) < atr * 2.5
+                    and (idx_h - idx_l) >= 4 and (idx_r - idx_h) >= 4):
+                neckline = window["high"].iloc[idx_l:idx_r].max()
+                if window["close"].iloc[-1] > neckline - atr:
+                    return PatternResult(True, "Inverted H&S", "LONG", 25,
+                        f"Inv H&S tête={round(l_h,5)} épaules≈{round((l_l+l_r)/2,5)}")
+    return empty
+
+
+def detect_wedge(df: pd.DataFrame, direction: str) -> PatternResult:
+    """Falling Wedge (LONG reversal) / Rising Wedge (SHORT reversal)."""
+    empty = PatternResult(False, "", direction, 0, "")
+    if len(df) < 20:
+        return empty
+    window = df.iloc[-30:]
+    atr    = (window["high"] - window["low"]).rolling(14).mean().iloc[-1]
+    x      = np.arange(len(window))
+    slope_h = np.polyfit(x, window["high"].values, 1)[0]
+    slope_l = np.polyfit(x, window["low"].values,  1)[0]
+    # Falling Wedge : deux pentes négatives, lows moins négatifs que highs → convergent vers le bas
+    if slope_h < -atr * 0.004 and slope_l < -atr * 0.004 and slope_l > slope_h and direction == "LONG":
+        return PatternResult(True, "Falling Wedge 📐", "LONG", 16,
+            f"Falling Wedge haussier — pentes H={round(slope_h,5)} L={round(slope_l,5)}")
+    # Rising Wedge : deux pentes positives, highs moins positifs que lows → convergent vers le haut
+    if slope_h > atr * 0.004 and slope_l > atr * 0.004 and slope_h < slope_l and direction == "SHORT":
+        return PatternResult(True, "Rising Wedge 📐", "SHORT", 16,
+            f"Rising Wedge baissier — pentes H={round(slope_h,5)} L={round(slope_l,5)}")
+    return empty
+
+
+def detect_triangle(df: pd.DataFrame, direction: str) -> PatternResult:
+    """Ascending / Descending / Symmetrical Triangle."""
+    empty = PatternResult(False, "", direction, 0, "")
+    if len(df) < 20:
+        return empty
+    window  = df.iloc[-35:]
+    atr     = (window["high"] - window["low"]).rolling(14).mean().iloc[-1]
+    x       = np.arange(len(window))
+    slope_h = np.polyfit(x, window["high"].values, 1)[0]
+    slope_l = np.polyfit(x, window["low"].values,  1)[0]
+    if abs(slope_h) < atr * 0.003 and slope_l > atr * 0.004 and direction == "LONG":
+        return PatternResult(True, "Ascending Triangle 📐", "LONG", 15,
+            f"Ascending Triangle — résistance plate + lows ascendants")
+    if abs(slope_l) < atr * 0.003 and slope_h < -atr * 0.004 and direction == "SHORT":
+        return PatternResult(True, "Descending Triangle 📐", "SHORT", 15,
+            f"Descending Triangle — support plat + highs descendants")
+    if slope_h < -atr * 0.003 and slope_l > atr * 0.003:
+        name = "Sym. Triangle 📐 (haussier)" if direction == "LONG" else "Sym. Triangle 📐 (baissier)"
+        return PatternResult(True, name, direction, 12,
+            f"Triangle symétrique — convergence imminente")
+    return empty
+
+
+def detect_flag(df: pd.DataFrame, direction: str) -> PatternResult:
+    """Bull Flag (LONG continuation) / Bear Flag (SHORT continuation)."""
+    empty = PatternResult(False, "", direction, 0, "")
+    if len(df) < 20:
+        return empty
+    pole_window = df.iloc[-20:-8]
+    flag_window = df.iloc[-8:]
+    atr         = (df["high"] - df["low"]).rolling(14).mean().iloc[-1]
+    pole_move   = abs(pole_window["close"].iloc[-1] - pole_window["open"].iloc[0])
+    if pole_move < atr * 3:
+        return empty
+    pole_bull  = pole_window["close"].iloc[-1] > pole_window["open"].iloc[0]
+    flag_slope = np.polyfit(np.arange(len(flag_window)), flag_window["close"].values, 1)[0]
+    if pole_bull and flag_slope < 0 and abs(flag_slope) < atr * 0.08 and direction == "LONG":
+        return PatternResult(True, "Bull Flag 🚩", "LONG", 14,
+            f"Bull Flag — mât={round(pole_move,5)} / drapeau légèrement baissier")
+    if not pole_bull and flag_slope > 0 and abs(flag_slope) < atr * 0.08 and direction == "SHORT":
+        return PatternResult(True, "Bear Flag 🚩", "SHORT", 14,
+            f"Bear Flag — mât={round(pole_move,5)} / drapeau légèrement haussier")
+    return empty
+
+
+def detect_all_patterns(df_h4: pd.DataFrame, df_ltf: pd.DataFrame,
+                         direction: str) -> list[PatternResult]:
+    """Lance tous les détecteurs de patterns sur H4 + LTF."""
+    results = []
+    for df in (df_h4, df_ltf):
+        results.append(detect_double_top_bottom(df, direction))
+        results.append(detect_triple_top_bottom(df, direction))
+        results.append(detect_head_shoulders(df, direction))
+        results.append(detect_wedge(df, direction))
+        results.append(detect_triangle(df, direction))
+        results.append(detect_flag(df, direction))
+    return [p for p in results if p.detected]
+
+
+def detect_ob_retest(df_h4: pd.DataFrame, df_ltf: pd.DataFrame,
+                     direction: str, sd_zones: list) -> OBRetestResult:
+    """
+    Détecte les 3 types de retest OB/Demand Zone (Image 2) :
+    1. CONTINUATION PATTERN  — canal descendant / bear flag sur la zone
+    2. CONSOLIDATION         — range serré au-dessus/dessous de la zone
+    3. BSL RETEST (PDL/PDH)  — chasse de liquidité puis rebond sur la zone
+    """
+    empty = OBRetestResult(False, "", direction, 0, "")
+    if len(df_ltf) < 20 or not sd_zones:
+        return empty
+    atr    = (df_ltf["high"] - df_ltf["low"]).rolling(14).mean().iloc[-1]
+    price  = df_ltf["close"].iloc[-1]
+    zone   = sd_zones[0]
+    in_zone = (zone.bottom - atr * 0.3) <= price <= (zone.top + atr * 0.5)
+    if not in_zone:
+        return empty
+    zone_mid = (zone.top + zone.bottom) / 2
+    recent   = df_ltf.iloc[-12:]
+    x        = np.arange(len(recent))
+    slope_h  = np.polyfit(x, recent["high"].values, 1)[0]
+    slope_l  = np.polyfit(x, recent["low"].values,  1)[0]
+    # 1. Continuation pattern (canal / flag vers la zone)
+    if direction == "LONG" and slope_h < -atr * 0.002 and slope_l < -atr * 0.002:
+        return OBRetestResult(True, "continuation", direction, 15,
+            f"🔁 Continuation Pattern sur Demand Zone @ {round(zone_mid,5)}")
+    if direction == "SHORT" and slope_h > atr * 0.002 and slope_l > atr * 0.002:
+        return OBRetestResult(True, "continuation", direction, 15,
+            f"🔁 Continuation Pattern sur Supply Zone @ {round(zone_mid,5)}")
+    # 2. Consolidation
+    recent_range = (recent["high"] - recent["low"]).mean()
+    if recent_range < atr * 0.6:
+        return OBRetestResult(True, "consolidation", direction, 12,
+            f"📦 Consolidation sur zone @ {round(zone_mid,5)} — range={round(recent_range,5)}")
+    # 3. BSL/PDL Retest
+    if len(df_h4) >= 12:
+        pd_window = df_h4.iloc[-12:-6]
+        pdl = pd_window["low"].min()
+        pdh = pd_window["high"].max()
+        last_low   = df_ltf["low"].iloc[-3:-1].min()
+        last_high  = df_ltf["high"].iloc[-3:-1].max()
+        last_close = df_ltf["close"].iloc[-1]
+        if direction == "LONG" and last_low < pdl and last_close > pdl:
+            return OBRetestResult(True, "bsl_retest", direction, 18,
+                f"💧 BSL Retest — PDL swept @ {round(pdl,5)} → rebond Demand Zone")
+        if direction == "SHORT" and last_high > pdh and last_close < pdh:
+            return OBRetestResult(True, "bsl_retest", direction, 18,
+                f"💧 BSL Retest — PDH swept @ {round(pdh,5)} → rebond Supply Zone")
+    return empty
+
+
+def best_pattern(patterns: list[PatternResult]) -> Optional[PatternResult]:
+    """Retourne le pattern avec le score bonus le plus élevé."""
+    return max(patterns, key=lambda p: p.score_bonus) if patterns else None
+
+
 def detect_liquidity_sweep(df: pd.DataFrame) -> dict:
     result  = {"bullish_sweep": False, "bearish_sweep": False, "level": None}
     window  = df.iloc[-30:]
@@ -1410,6 +1706,11 @@ def compute_score_v3(
     sd_zone_active:     bool = False,   # Supply/Demand zone active
     entry_candle_score: int  = 0,       # bonus des bougies institutionnelles
     older_block_htf:    bool = False,   # OB H4 actif
+    # Chart Patterns + OB Retest
+    pattern_bonus:      int  = 0,
+    pattern_name:       str  = "",
+    ob_retest_bonus:    int  = 0,
+    ob_retest_desc:     str  = "",
 ) -> tuple[int, list[str]]:
     score   = 0
     reasons = []
@@ -1476,6 +1777,18 @@ def compute_score_v3(
         ec_pts = min(entry_candle_score, 20)
         score += ec_pts
         reasons.append(f"🕯️ Bougie d'entrée institutionnelle  (+{ec_pts})")
+
+    # ── CHART PATTERNS (max 25 pts) ───────────────────────────
+    if pattern_bonus > 0 and pattern_name:
+        p_pts = min(pattern_bonus, 25)
+        score += p_pts
+        reasons.append(f"📐 Pattern détecté : {pattern_name}  (+{p_pts})")
+
+    # ── OB RETEST (max 18 pts) ────────────────────────────────
+    if ob_retest_bonus > 0 and ob_retest_desc:
+        r_pts = min(ob_retest_bonus, 18)
+        score += r_pts
+        reasons.append(f"{ob_retest_desc}  (+{r_pts})")
 
     return min(score, 100), reasons
 
@@ -1738,6 +2051,18 @@ def analyse(symbol: str, htf: str = HTF, ltf: str = LTF,
     entry_candles = detect_institutional_entry_candles(df_ltf, direction)
     ec_total_score = sum(ec.score_bonus for ec in entry_candles[:3])  # top 3 seulement
 
+    # ── Chart Patterns (H4 + M5) ──────────────────────────────
+    detected_patterns = detect_all_patterns(df_htf, df_ltf, direction)
+    top_pattern       = best_pattern(detected_patterns)
+    pat_bonus  = top_pattern.score_bonus if top_pattern else 0
+    pat_name   = top_pattern.pattern_name if top_pattern else ""
+    pat_desc   = top_pattern.description  if top_pattern else ""
+
+    # ── OB Retest (3 types) ───────────────────────────────────
+    ob_retest     = detect_ob_retest(df_htf, df_ltf, direction, sd_zones)
+    ob_ret_bonus  = ob_retest.score_bonus if ob_retest.detected else 0
+    ob_ret_desc   = ob_retest.description if ob_retest.detected else ""
+
     if not silent:
         print(f"\n  {'FVG M5 actif':<28} {tick(ltf_fvg_ok)}")
         print(f"  {'FVG non mitiqué':<28} {tick(fvg_unmit_ok)}")
@@ -1749,6 +2074,15 @@ def analyse(symbol: str, htf: str = HTF, ltf: str = LTF,
             print(f"  {'Bougies institutionnelles':<28} {c(ec_names, 'green')}  (+{ec_total_score})")
         else:
             print(f"  {'Bougies institutionnelles':<28} {c('Aucune détectée', 'white')}")
+        if detected_patterns:
+            pat_names_str = " · ".join(p.pattern_name for p in detected_patterns[:3])
+            print(f"  {'📐 Chart Patterns':<28} {c(pat_names_str, 'magenta')}  (+{pat_bonus})")
+        else:
+            print(f"  {'📐 Chart Patterns':<28} {c('Aucun', 'white')}")
+        if ob_retest.detected:
+            print(f"  {'🔁 OB Retest':<28} {c(ob_retest.retest_type, 'yellow')}  (+{ob_ret_bonus})")
+        else:
+            print(f"  {'🔁 OB Retest':<28} {c('Non détecté', 'white')}")
 
     # ─────────────────────────────────────────────────────────
     #  SCORING v3
@@ -1770,6 +2104,10 @@ def analyse(symbol: str, htf: str = HTF, ltf: str = LTF,
         sd_zone_active    = sd_ok,
         entry_candle_score= ec_total_score,
         older_block_htf   = older_block,
+        pattern_bonus     = pat_bonus,
+        pattern_name      = pat_name,
+        ob_retest_bonus   = ob_ret_bonus,
+        ob_retest_desc    = ob_ret_desc,
     )
 
     # Ajout des raisons AMD
@@ -1863,6 +2201,10 @@ def analyse(symbol: str, htf: str = HTF, ltf: str = LTF,
         mode = "AMD"
     elif sept_ok and sept_count >= 5:
         mode = "SEPTUPLE"
+    elif pat_bonus >= 18:
+        mode = "PATTERN"
+    elif ob_retest.detected and ob_ret_bonus >= 15:
+        mode = "OB_RETEST"
     elif sd_ok:
         mode = "SD"
     else:
@@ -2109,6 +2451,32 @@ def startup_check() -> bool:
     if not yf_ok:
         log.warning("  ⚠ yfinance indisponible — démarrage quand même.")
 
+    # ── Message de démarrage Telegram ────────────────────────
+    ts_start = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
+    startup_msg = (
+        f"🟢 <b>SMC Signal Engine v3 — DÉMARRÉ</b>\n"
+        f"{'─'*30}\n"
+        f"<b>🕐 Heure :</b> <code>{ts_start}</code>\n"
+        f"<b>📊 Timeframes :</b> H4 → M15 → M5\n"
+        f"<b>⚙️ Score min :</b> {SCORE_THRESHOLD}/100\n"
+        f"<b>⚖️ RR min :</b> 1:{MIN_RR}\n"
+        f"<b>💰 Risque/trade :</b> ${RISK_USD}\n"
+        f"<b>🔮 Modes :</b> SMC · AMD · Septuple · Supply/Demand\n"
+        f"{'─'*30}\n"
+        f"✅ Bot connecté · yfinance {'OK' if yf_ok else '⚠ indispo'}\n"
+        f"🔍 Scan actif toutes les 30s"
+    )
+    try:
+        if TELEGRAM_GROUP_ID:
+            requests.post(_tg_url("sendMessage"), json={
+                "chat_id": TELEGRAM_GROUP_ID,
+                "text": startup_msg,
+                "parse_mode": "HTML",
+            }, timeout=10)
+            log.info("  ✓ Message de démarrage envoyé sur Telegram")
+    except Exception as e:
+        log.warning(f"  ⚠ Envoi startup Telegram échoué : {e}")
+
     log.info("  ✓ Démarrage scan live\n")
     return True
 
@@ -2160,7 +2528,7 @@ def run_live(cat: str = "forex", min_score: int = SCORE_THRESHOLD,
             now_utc  = datetime.now(timezone.utc)
             now_str  = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
 
-            if not is_session_active()[0]:
+            if not is_session_active():
                 if cycle_n % 10 == 1:
                     log.info(f"  💤 [{cycle_n}] {now_utc.strftime('%H:%M UTC')} — Hors session — actif ✓")
                 with _STATUS_LOCK:
