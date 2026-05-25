@@ -66,7 +66,8 @@ def index():
     for s in reversed(st["last_signals"][-15:]):
         color    = "#e74c3c" if s["direction"] == "SHORT" else "#2ecc71"
         mode_col = {"AMD": "#9b59b6", "PRE-BOS": "#f39c12",
-                    "SMC": "#58a6ff"}.get(s.get("mode", "SMC"), "#58a6ff")
+                    "SMC": "#58a6ff", "SWEEP_SHIFT": "#e67e22",
+                    "CHOCH_LIQ": "#1abc9c"}.get(s.get("mode", "SMC"), "#58a6ff")
         signals_html += (
             f"<tr>"
             f"<td>{s['ts']}</td>"
@@ -128,7 +129,8 @@ def index():
     <tr><td>RR minimum</td><td>1:{MIN_RR}</td></tr>
     <tr><td>Risque/trade</td><td>${RISK_USD}</td></tr>
     <tr><td>Timeframes</td><td>H4 → M15 → M5</td></tr>
-    <tr><td>Modes</td><td>SMC + AMD + Septuple Traction + Supply/Demand</td></tr>
+    <tr><td>Modes</td><td>SMC + AMD + Septuple + Supply/Demand + 4H Sweep+5M Shift + CHoCH+EQL</td></tr>
+    <tr><td>BTC</td><td>🟢 Scan 24/7 (weekends inclus)</td></tr>
     <tr><td>Intervalle scan</td><td>30 secondes</td></tr>
   </table>
 </body>
@@ -211,6 +213,16 @@ def is_session_active() -> bool:
     return any(start <= hour < end for start, end in SESSION_WINDOWS_UTC)
 
 
+def is_weekend() -> bool:
+    """Retourne True si on est samedi ou dimanche (UTC)."""
+    return datetime.now(timezone.utc).weekday() >= 5   # 5=Sat, 6=Sun
+
+
+def is_crypto_symbol(symbol: str) -> bool:
+    """BTC et autres crypto tradent 24/7, y compris le weekend."""
+    return symbol in ("BTC-USD", "ETH-USD", "BTC-USDT", "ETH-USDT")
+
+
 # ─────────────────────────────────────────────────────────────
 #  ATR MINIMUM PAR INSTRUMENT
 # ─────────────────────────────────────────────────────────────
@@ -243,6 +255,9 @@ def check_volatility(symbol: str, df_ltf: pd.DataFrame) -> tuple[bool, str]:
     ratio = spread / atr if atr > 0 else 1.0
     if ratio > MAX_SPREAD_ATR_RATIO:
         return False, f"spread/ATR={round(ratio*100,1)}% > {int(MAX_SPREAD_ATR_RATIO*100)}%"
+    # Les cryptos (BTC) tradent 24/7 — pas de filtre session
+    if is_crypto_symbol(symbol):
+        return True, ""
     if not is_session_active():
         return False, "hors session (London/NY)"
     return True, ""
@@ -402,13 +417,15 @@ def tg_format_signal(sig: "Signal", tier: str = "", mode: str = "SMC") -> str:
     spread_d   = round(get_spread(sig.symbol), dec)
 
     mode_badge = {
-        "AMD"      : "🔮 AMD — Accumulation·Manipulation·Distribution",
-        "SEPTUPLE" : "⚡ SEPTUPLE TRACTION H4",
-        "SD"       : "🏛️ SUPPLY & DEMAND ZONE",
-        "SMC"      : "📊 SMC — Structure · FVG · OB",
-        "PRE-BOS"  : "⚠️ PRE-BOS — Avant cassure",
-        "PATTERN"  : "📐 CHART PATTERN",
-        "OB_RETEST": "🔁 OB RETEST",
+        "AMD"        : "🔮 AMD — Accumulation·Manipulation·Distribution",
+        "SEPTUPLE"   : "⚡ SEPTUPLE TRACTION H4",
+        "SD"         : "🏛️ SUPPLY & DEMAND ZONE",
+        "SMC"        : "📊 SMC — Structure · FVG · OB",
+        "PRE-BOS"    : "⚠️ PRE-BOS — Avant cassure",
+        "PATTERN"    : "📐 CHART PATTERN",
+        "OB_RETEST"  : "🔁 OB RETEST",
+        "SWEEP_SHIFT": "🔄 4H SWEEP + 5M SHIFT — Liquidity Grab → Shift",
+        "CHOCH_LIQ"  : "💰 CHoCH + EQUAL LIQ — Manipulation institutionnelle",
     }.get(mode, "📊 SMC")
 
     msg = (
@@ -1678,7 +1695,257 @@ def detect_confirmation_candle(df: pd.DataFrame, direction: str) -> bool:
 
 
 # ═════════════════════════════════════════════════════════════
-#  MOTEUR DE SCORE v3
+#  ⑦ SETUP : 4H SWEEP + 5M SHIFT + TARGET 4H HIGH/LOW
+#
+#  Logique (Image 1 — Instagram Reel) :
+#  ─────────────────────────────────────
+#  H4  : Le prix casse brièvement un swing Low/High récent
+#         (sweep de la liquidité SSL ou BSL), puis CLÔTURE de retour
+#         dans le range → manipulation institutionnelle confirmée.
+#
+#  5M  : Dans les bougies suivant le sweep H4, un BOS/CHoCH bullish
+#         (ou bearish) se forme → shift de structure = confirmation
+#         que les institutionnels ont inversé la direction.
+#
+#  TP  : Prochain High H4 (LONG) ou prochain Low H4 (SHORT)
+#         = la "distribution" institutionnelle vise le côté opposé.
+#
+#  Score bonus : +22 si sweep + shift confirmés
+# ═════════════════════════════════════════════════════════════
+
+def detect_h4_sweep_5m_shift(
+    df_h4: pd.DataFrame,
+    df_m5: pd.DataFrame,
+    direction: str,
+) -> dict:
+    """
+    Détecte le setup 4H Sweep + 5M Shift.
+
+    Retourne :
+      detected      : bool
+      sweep_level   : float | None   — niveau sweepé sur H4
+      target_h4     : float | None   — prochain H/L H4 visé
+      score_bonus   : int
+      reasons       : list[str]
+    """
+    empty = {"detected": False, "sweep_level": None,
+             "target_h4": None, "score_bonus": 0, "reasons": []}
+
+    if len(df_h4) < 20 or len(df_m5) < 20:
+        return empty
+
+    atr_h4 = (df_h4["high"] - df_h4["low"]).rolling(14).mean().iloc[-1]
+    if pd.isna(atr_h4) or atr_h4 == 0:
+        return empty
+
+    sweep_level = None
+    sweep_found = False
+
+    # ── Cherche un sweep dans les 6 dernières bougies H4 ────────
+    for i in range(-6, -1):
+        abs_i = len(df_h4) + i
+        if abs_i < 15:
+            continue
+
+        h   = df_h4["high"].iloc[i]
+        l   = df_h4["low"].iloc[i]
+        cl  = df_h4["close"].iloc[i]
+
+        lookback = df_h4.iloc[abs_i - 15: abs_i]
+        if len(lookback) < 5:
+            continue
+
+        prev_low  = lookback["low"].min()
+        prev_high = lookback["high"].max()
+
+        if direction == "LONG":
+            # SSL sweep : mèche basse sous prev_low, clôture au-dessus
+            if l < prev_low - atr_h4 * 0.05 and cl > prev_low:
+                sweep_level = prev_low
+                sweep_found = True
+                break
+        else:
+            # BSL sweep : mèche haute au-dessus prev_high, clôture en-dessous
+            if h > prev_high + atr_h4 * 0.05 and cl < prev_high:
+                sweep_level = prev_high
+                sweep_found = True
+                break
+
+    if not sweep_found or sweep_level is None:
+        return empty
+
+    # ── Vérifie le Shift M5 (BOS aligné) dans les 10 dernières bougies ─
+    bos_m5 = detect_bos(df_m5)
+    target_bos_type = "bullish" if direction == "LONG" else "bearish"
+    recent_bos = [b for b in bos_m5[-10:] if b["type"] == target_bos_type]
+
+    if not recent_bos:
+        return empty   # Pas de shift M5 → setup invalide
+
+    # ── Target : prochain High/Low H4 non cassé ─────────────────
+    window_h4 = df_h4.iloc[-30:]
+    if direction == "LONG":
+        # Vise le plus récent swing High H4 au-dessus du prix actuel
+        price_now = df_m5["close"].iloc[-1]
+        candidates = [
+            window_h4["high"].iloc[k]
+            for k in range(1, len(window_h4) - 1)
+            if window_h4["high"].iloc[k] > window_h4["high"].iloc[k-1]
+               and window_h4["high"].iloc[k] > window_h4["high"].iloc[k+1]
+               and window_h4["high"].iloc[k] > price_now
+        ]
+        target_h4 = min(candidates) if candidates else round(window_h4["high"].max(), 2)
+    else:
+        price_now = df_m5["close"].iloc[-1]
+        candidates = [
+            window_h4["low"].iloc[k]
+            for k in range(1, len(window_h4) - 1)
+            if window_h4["low"].iloc[k] < window_h4["low"].iloc[k-1]
+               and window_h4["low"].iloc[k] < window_h4["low"].iloc[k+1]
+               and window_h4["low"].iloc[k] < price_now
+        ]
+        target_h4 = max(candidates) if candidates else round(window_h4["low"].min(), 2)
+
+    sweep_type = "SSL (bas de range) → LONG" if direction == "LONG" \
+                 else "BSL (haut de range) → SHORT"
+    reasons = [
+        f"🔄 4H Sweep {sweep_type} @ {round(sweep_level, 5)}  (+15)",
+        f"📐 5M Shift confirmé (BOS {target_bos_type})  (+7)",
+        f"🎯 Target H4 : {round(target_h4, 5)}",
+    ]
+
+    return {
+        "detected"   : True,
+        "sweep_level": sweep_level,
+        "target_h4"  : target_h4,
+        "score_bonus": 22,
+        "reasons"    : reasons,
+    }
+
+
+# ═════════════════════════════════════════════════════════════
+#  ⑧ SETUP : EQUAL HIGHS/LOWS + CHoCH + FVG + OB RETEST
+#             (SMC Liquidity School — Image 2)
+#
+#  Logique :
+#  ─────────
+#  1. Equal Highs (EQH) ou Equal Lows (EQL) = pool de liquidité
+#     Les institutionnels SAVENT que les stops sont là.
+#
+#  2. Sweep/Manipulation : le prix dépasse brièvement l'EQH ou EQL
+#     puis revient → liquidity grab ("draw on liquidity").
+#
+#  3. Change of Character (CHoCH) : premier BOS CONTRAIRE après
+#     le sweep = les institutionnels ont pris la liquidité et
+#     inversent maintenant → signal de retournement.
+#
+#  4. Liquidity void / FVG formé après le CHoCH = zone de valeur.
+#
+#  5. Entrée : retest de l'OB baissier (ou haussier) ≈ 50% OB.
+#     Target : prochain OB institutionnel de l'autre côté.
+#
+#  Score bonus : +25 si tous les critères sont réunis
+# ═════════════════════════════════════════════════════════════
+
+def detect_choch_eql_setup(
+    df_h4:    pd.DataFrame,
+    df_m5:    pd.DataFrame,
+    liq_map:  "LiquidityMap",
+    direction: str,
+) -> dict:
+    """
+    Détecte le setup Equal Liq + CHoCH + FVG + OB.
+
+    Retourne :
+      detected      : bool
+      choch_level   : float | None
+      fvg_present   : bool
+      score_bonus   : int
+      reasons       : list[str]
+    """
+    empty = {"detected": False, "choch_level": None,
+             "fvg_present": False, "score_bonus": 0, "reasons": []}
+
+    if len(df_h4) < 20 or len(df_m5) < 20:
+        return empty
+
+    # ── 1. Equal Highs/Lows présents (liquidité institutionnelle) ─
+    has_eqh = bool(liq_map.eqh_levels)
+    has_eql = bool(liq_map.eql_levels)
+
+    if direction == "SHORT" and not has_eqh:
+        return empty   # SHORT : il faut des EQH pour sweeper
+    if direction == "LONG" and not has_eql:
+        return empty   # LONG : il faut des EQL pour sweeper
+
+    eq_levels = liq_map.eqh_levels if direction == "SHORT" else liq_map.eql_levels
+    eq_level  = eq_levels[0] if eq_levels else None
+
+    # ── 2. Le prix a-t-il sweepé le niveau EQH/EQL ? ─────────────
+    price_now = df_m5["close"].iloc[-1]
+    atr_m5    = (df_m5["high"] - df_m5["low"]).rolling(14).mean().iloc[-1]
+    if pd.isna(atr_m5) or atr_m5 == 0 or eq_level is None:
+        return empty
+
+    if direction == "SHORT":
+        # Prix a dépassé l'EQH puis est redescendu
+        swept = any(
+            df_m5["high"].iloc[i] > eq_level + atr_m5 * 0.05
+            and df_m5["close"].iloc[i] < eq_level
+            for i in range(-10, -1)
+            if abs(i) <= len(df_m5)
+        )
+    else:
+        # Prix a cassé l'EQL puis est remonté
+        swept = any(
+            df_m5["low"].iloc[i] < eq_level - atr_m5 * 0.05
+            and df_m5["close"].iloc[i] > eq_level
+            for i in range(-10, -1)
+            if abs(i) <= len(df_m5)
+        )
+
+    if not swept:
+        return empty
+
+    # ── 3. CHoCH (premier BOS contraire après sweep) ──────────────
+    bos_m5 = detect_bos(df_m5)
+    choch_type   = "bullish" if direction == "LONG" else "bearish"
+    choch_recent = [b for b in bos_m5[-8:] if b["type"] == choch_type]
+    choch_level  = choch_recent[-1]["level"] if choch_recent else None
+
+    if choch_level is None:
+        return empty
+
+    # ── 4. FVG post-CHoCH ─────────────────────────────────────────
+    fvgs_m5     = detect_fvg(df_m5)
+    fvg_dir     = "bullish" if direction == "LONG" else "bearish"
+    fvg_present = any(f.direction == fvg_dir for f in fvgs_m5[-10:])
+
+    # ── Score ─────────────────────────────────────────────────────
+    score  = 15   # base : EQL sweep + CHoCH
+    score += 5 if fvg_present else 0
+    score += 5 if (has_eqh and direction == "SHORT") or (has_eql and direction == "LONG") else 0
+
+    eq_type_str = "EQH (equal highs)" if direction == "SHORT" else "EQL (equal lows)"
+    choch_str   = "bearish CHoCH" if direction == "SHORT" else "bullish CHoCH"
+
+    reasons = [
+        f"💰 {eq_type_str} = pool de liquidité sweepé @ {round(eq_level, 5)}  (+15)",
+        f"🔃 {choch_str} confirmé @ {round(choch_level, 5)}  (+5)",
+    ]
+    if fvg_present:
+        reasons.append(f"🕳️ Liquidity void / FVG post-CHoCH présent  (+5)")
+
+    return {
+        "detected"    : True,
+        "choch_level" : choch_level,
+        "fvg_present" : fvg_present,
+        "score_bonus" : min(score, 25),
+        "reasons"     : reasons,
+    }
+
+
+
 #  Architecture :
 #    Base H4 (biais + AMD + Septuple)        → 0–45 pts
 #    Structure M15 (BOS + OB + Liquidité)    → 0–30 pts
@@ -1711,6 +1978,9 @@ def compute_score_v3(
     pattern_name:       str  = "",
     ob_retest_bonus:    int  = 0,
     ob_retest_desc:     str  = "",
+    # ── Nouveaux setups ──────────────────────────────────────
+    sweep_shift_bonus:  int  = 0,    # Setup 4H Sweep + 5M Shift
+    choch_eql_bonus:    int  = 0,    # Setup CHoCH + Equal Liq
 ) -> tuple[int, list[str]]:
     score   = 0
     reasons = []
@@ -1789,6 +2059,18 @@ def compute_score_v3(
         r_pts = min(ob_retest_bonus, 18)
         score += r_pts
         reasons.append(f"{ob_retest_desc}  (+{r_pts})")
+
+    # ── 4H SWEEP + 5M SHIFT (max 22 pts) ─────────────────────
+    if sweep_shift_bonus > 0:
+        ss_pts = min(sweep_shift_bonus, 22)
+        score += ss_pts
+        # raisons déjà dans reasons via detect_h4_sweep_5m_shift
+
+    # ── CHoCH + EQUAL LIQ (max 25 pts) ───────────────────────
+    if choch_eql_bonus > 0:
+        ce_pts = min(choch_eql_bonus, 25)
+        score += ce_pts
+        # raisons déjà dans reasons via detect_choch_eql_setup
 
     return min(score, 100), reasons
 
@@ -2063,6 +2345,14 @@ def analyse(symbol: str, htf: str = HTF, ltf: str = LTF,
     ob_ret_bonus  = ob_retest.score_bonus if ob_retest.detected else 0
     ob_ret_desc   = ob_retest.description if ob_retest.detected else ""
 
+    # ── Setup ⑦ : 4H Sweep + 5M Shift ────────────────────────
+    sweep_shift   = detect_h4_sweep_5m_shift(df_htf, df_ltf, direction)
+    ss_bonus      = sweep_shift["score_bonus"] if sweep_shift["detected"] else 0
+
+    # ── Setup ⑧ : CHoCH + Equal Liq ──────────────────────────
+    choch_eql     = detect_choch_eql_setup(df_htf, df_ltf, liq_map, direction)
+    ce_bonus      = choch_eql["score_bonus"] if choch_eql["detected"] else 0
+
     if not silent:
         print(f"\n  {'FVG M5 actif':<28} {tick(ltf_fvg_ok)}")
         print(f"  {'FVG non mitiqué':<28} {tick(fvg_unmit_ok)}")
@@ -2083,6 +2373,15 @@ def analyse(symbol: str, htf: str = HTF, ltf: str = LTF,
             print(f"  {'🔁 OB Retest':<28} {c(ob_retest.retest_type, 'yellow')}  (+{ob_ret_bonus})")
         else:
             print(f"  {'🔁 OB Retest':<28} {c('Non détecté', 'white')}")
+        # Nouveaux setups
+        if sweep_shift["detected"]:
+            print(f"  {'🔄 4H Sweep+5M Shift':<28} {c('✓ DÉTECTÉ', 'green')}  (+{ss_bonus})")
+        else:
+            print(f"  {'🔄 4H Sweep+5M Shift':<28} {c('Non détecté', 'white')}")
+        if choch_eql["detected"]:
+            print(f"  {'💰 CHoCH+Equal Liq':<28} {c('✓ DÉTECTÉ', 'green')}  (+{ce_bonus})")
+        else:
+            print(f"  {'💰 CHoCH+Equal Liq':<28} {c('Non détecté', 'white')}")
 
     # ─────────────────────────────────────────────────────────
     #  SCORING v3
@@ -2108,11 +2407,19 @@ def analyse(symbol: str, htf: str = HTF, ltf: str = LTF,
         pattern_name      = pat_name,
         ob_retest_bonus   = ob_ret_bonus,
         ob_retest_desc    = ob_ret_desc,
+        sweep_shift_bonus = ss_bonus,
+        choch_eql_bonus   = ce_bonus,
     )
 
     # Ajout des raisons AMD
     if amd_ok:
         reasons = amd.reasons + reasons
+
+    # Ajout des raisons Sweep+Shift et CHoCH+EQL
+    if sweep_shift["detected"]:
+        reasons = sweep_shift["reasons"] + reasons
+    if choch_eql["detected"]:
+        reasons = choch_eql["reasons"] + reasons
 
     # ─────────────────────────────────────────────────────────
     #  FILTRE ZONE D'ENTRÉE — au moins UNE zone valide
@@ -2201,6 +2508,10 @@ def analyse(symbol: str, htf: str = HTF, ltf: str = LTF,
         mode = "AMD"
     elif sept_ok and sept_count >= 5:
         mode = "SEPTUPLE"
+    elif sweep_shift["detected"] and ss_bonus >= 20:
+        mode = "SWEEP_SHIFT"
+    elif choch_eql["detected"] and ce_bonus >= 20:
+        mode = "CHOCH_LIQ"
     elif pat_bonus >= 18:
         mode = "PATTERN"
     elif ob_retest.detected and ob_ret_bonus >= 15:
@@ -2413,7 +2724,8 @@ def startup_check() -> bool:
     log.info("  SMC SIGNAL ENGINE v3  —  AMD · Septuple · Supply/Demand")
     log.info(f"  HTF={HTF}  MTF={MTF}  LTF={LTF}")
     log.info(f"  Score min : {SCORE_THRESHOLD}/100   RR min : {MIN_RR}   Risque : ${RISK_USD}")
-    log.info(f"  Crypto    : BTC-USD uniquement")
+    log.info(f"  Crypto    : BTC-USD 24/7 (y compris weekends)")
+    log.info(f"  Setups    : SMC · AMD · Septuple · S/D · 4H Sweep+5M Shift · CHoCH+EQL")
     log.info("=" * 65)
 
     try:
@@ -2462,6 +2774,8 @@ def startup_check() -> bool:
         f"<b>⚖️ RR min :</b> 1:{MIN_RR}\n"
         f"<b>💰 Risque/trade :</b> ${RISK_USD}\n"
         f"<b>🔮 Modes :</b> SMC · AMD · Septuple · Supply/Demand\n"
+        f"<b>🔄 Nouveau :</b> 4H Sweep+5M Shift · CHoCH+Equal Liq\n"
+        f"<b>₿ BTC :</b> Scan 24/7 (weekends inclus) ✅\n"
         f"{'─'*30}\n"
         f"✅ Bot connecté · yfinance {'OK' if yf_ok else '⚠ indispo'}\n"
         f"🔍 Scan actif toutes les 30s"
@@ -2529,29 +2843,41 @@ def run_live(cat: str = "forex", min_score: int = SCORE_THRESHOLD,
             now_str  = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
 
             if not is_session_active():
-                if cycle_n % 10 == 1:
-                    log.info(f"  💤 [{cycle_n}] {now_utc.strftime('%H:%M UTC')} — Hors session — actif ✓")
-                with _STATUS_LOCK:
-                    _STATUS["cycle"] = cycle_n
-                    _STATUS["last_scan"] = now_str
-                    _STATUS["scan_running"] = False
-                time.sleep(interval)
-                continue
+                # ── Weekend ou hors session ──────────────────────────
+                # BTC/crypto tradent 24/7 → on garde uniquement BTC
+                btc_only = [(s, m) for s, m in symbols if is_crypto_symbol(s)]
+                if btc_only:
+                    # On scanne BTC même le weekend
+                    symbols_to_scan = btc_only
+                    if cycle_n % 10 == 1:
+                        log.info(f"  🌙 [{cycle_n}] {now_utc.strftime('%H:%M UTC')} "
+                                 f"— Hors session Forex/Gold  |  BTC scan actif ✓")
+                else:
+                    if cycle_n % 10 == 1:
+                        log.info(f"  💤 [{cycle_n}] {now_utc.strftime('%H:%M UTC')} — Hors session — attente")
+                    with _STATUS_LOCK:
+                        _STATUS["cycle"] = cycle_n
+                        _STATUS["last_scan"] = now_str
+                        _STATUS["scan_running"] = False
+                    time.sleep(interval)
+                    continue
+            else:
+                symbols_to_scan = symbols
 
             with _STATUS_LOCK:
                 _STATUS["scan_running"] = True
                 _STATUS["cycle"]        = cycle_n
                 _STATUS["last_scan"]    = now_str
 
-            log.info(f"  🔍 [{cycle_n}] {now_utc.strftime('%H:%M UTC')} — Scan {len(symbols)} paires")
+            log.info(f"  🔍 [{cycle_n}] {now_utc.strftime('%H:%M UTC')} — Scan {len(symbols_to_scan)} paires")
             correlation_guard_reset()
 
             W = 95
             print(f"\n{'╔' + '═'*W + '╗'}")
-            print(f"║  🔍  CYCLE #{cycle_n}  [{now_str}]  {len(symbols)} marchés  "
-                  + " " * max(0, W - 4 - 8 - len(now_str) - len(str(len(symbols))) - 20) + "║")
-            print(f"║  A=AMD · B=BOS · S=Supply/Demand · L=Liquidité · 7=Septuple  "
-                  + " " * max(0, W - 66) + "║")
+            print(f"║  🔍  CYCLE #{cycle_n}  [{now_str}]  {len(symbols_to_scan)} marchés  "
+                  + " " * max(0, W - 4 - 8 - len(now_str) - len(str(len(symbols_to_scan))) - 20) + "║")
+            print(f"║  A=AMD · B=BOS · S=Supply/Demand · L=Liquidité · 7=Septuple · R=Sweep/CHoCH  "
+                  + " " * max(0, W - 83) + "║")
             print(f"{'╠' + '═'*W + '╣'}")
             print(f"  {'N°':<4} {'Tier':<4} {'Marché':<14} {'Symbole':<12}"
                   f"  {'Prix':>14}  {'Biais':>6}"
@@ -2560,7 +2886,7 @@ def run_live(cat: str = "forex", min_score: int = SCORE_THRESHOLD,
 
             signals_found: list[tuple[str, str, Signal, str]] = []
 
-            for i, (sym, mkt) in enumerate(symbols, 1):
+            for i, (sym, mkt) in enumerate(symbols_to_scan, 1):
                 t1 = {s[0] for s in TIER_1_PRIORITY}
                 t2 = {s[0] for s in TIER_2_FOREX}
                 tier = c("T1🥇", "yellow") if sym in t1 else (
