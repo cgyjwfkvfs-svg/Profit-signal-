@@ -340,7 +340,7 @@ def correlation_guard(symbol: str, direction: str) -> tuple[bool, str]:
 # ─────────────────────────────────────────────────────────────
 #  TELEGRAM
 # ─────────────────────────────────────────────────────────────
-_TG_TOKEN_ENV = os.environ.get("TG_TOKEN", "")
+_TG_TOKEN_ENV = os.environ.get("TG_TOKEN", "8665812395:AAFO4BMTIrBCQJYVL8UytO028TcB1sDfgbI")
 if not _TG_TOKEN_ENV:
     raise EnvironmentError(
         "Variable d'environnement TG_TOKEN manquante.\n"
