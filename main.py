@@ -1,4 +1,3 @@
-
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
 ║         SMC SIGNAL ENGINE  v3  — Smart Money Concepts ELITE             ║
@@ -417,45 +416,258 @@ def tg_send(text: str, chat_id: str) -> bool:
         return False
 
 
-def tg_format_signal(sig: "Signal", tier: str = "", mode: str = "SMC") -> str:
+# ── Compteur de signaux ────────────────────────────────────────────────────
+_SIGNAL_COUNTER_FILE = "/tmp/smc_signal_count.txt"
+
+def _next_signal_number() -> int:
+    try:
+        with open(_SIGNAL_COUNTER_FILE, "r") as f:
+            n = int(f.read().strip()) + 1
+    except Exception:
+        n = 1
+    try:
+        with open(_SIGNAL_COUNTER_FILE, "w") as f:
+            f.write(str(n))
+    except Exception:
+        pass
+    return n
+
+_signal_number_cache: dict[str, int] = {}
+
+
+def tg_format_signal(sig: "Signal", tier: str = "", mode: str = "SMC",
+                     signal_num: int = 0) -> str:
+    """Format Telegram correspondant au screenshot du groupe SMC SIGNALS PRO."""
     dec = 2 if sig.entry > 100 else 5
-    dir_emoji = "🔴 SHORT" if sig.direction == "SHORT" else "🟢 LONG"
 
-    # TP1 = tp existant, TP2 = double de la distance
-    tp1 = sig.tp
     if sig.direction == "LONG":
-        tp2 = round(sig.entry + 2 * (sig.tp - sig.entry), dec)
+        tp2 = round(sig.entry + 2.0 * (sig.tp - sig.entry), dec)
+        tp3 = round(sig.entry + 2.5 * (sig.tp - sig.entry), dec)
+        tp1_pct = round((sig.tp   - sig.entry) / sig.entry * 100, 2)
+        tp2_pct = round((tp2      - sig.entry) / sig.entry * 100, 2)
+        tp3_pct = round((tp3      - sig.entry) / sig.entry * 100, 2)
+        sl_pct  = round((sig.sl   - sig.entry) / sig.entry * 100, 2)
+        mom     = "haussier"
+        struct  = "haussière"
     else:
-        tp2 = round(sig.entry - 2 * (sig.entry - sig.tp), dec)
+        tp2 = round(sig.entry - 2.0 * (sig.entry - sig.tp), dec)
+        tp3 = round(sig.entry - 2.5 * (sig.entry - sig.tp), dec)
+        tp1_pct = -round((sig.entry - sig.tp) / sig.entry * 100, 2)
+        tp2_pct = -round((sig.entry - tp2)    / sig.entry * 100, 2)
+        tp3_pct = -round((sig.entry - tp3)    / sig.entry * 100, 2)
+        sl_pct  =  round((sig.sl   - sig.entry) / sig.entry * 100, 2)
+        mom     = "baissier"
+        struct  = "baissière"
 
-    # Étoiles de probabilité basées sur le score
-    if sig.score >= 90:
-        stars = "⭐⭐⭐⭐⭐"
-    elif sig.score >= 80:
-        stars = "⭐⭐⭐⭐"
-    elif sig.score >= 75:
-        stars = "⭐⭐⭐"
-    else:
-        stars = "⭐⭐"
+    # Nom affichage
+    sym_map = {"GC=F": "XAUUSD / GOLD", "SI=F": "XAGUSD / SILVER",
+               "CL=F": "USOIL", "BZ=F": "UKOIL", "BTC-USD": "BTCUSD / Bitcoin",
+               "^GSPC": "S&P 500", "^NDX": "Nasdaq 100", "^DJI": "Dow Jones"}
+    sym_display = sym_map.get(sig.symbol,
+        sig.symbol.replace("=X", "").replace("-USD", "").replace("^", ""))
 
-    ts = sig.timestamp.strftime("%d/%m/%Y %H:%M UTC")
+    dir_arrow = "🟢 BUY / LONG" if sig.direction == "LONG" else "🔴 SELL / SHORT"
+    num_str   = f"#{signal_num}" if signal_num else ""
+
+    sign = lambda v: f"+{v}" if v > 0 else str(v)
 
     msg = (
-        f"⚡ <b>SIGNAL SMC — {dir_emoji}</b>\n"
-        f"{'─'*28}\n"
-        f"📌 <b>Marché :</b>  <code>{sig.symbol}</code>\n"
-        f"{'─'*28}\n"
-        f"📍 <b>Entrée :</b>   <code>{sig.entry}</code>\n"
-        f"🔴 <b>Stop Loss :</b>  <code>{sig.sl}</code>\n"
-        f"🎯 <b>TP 1 :</b>    <code>{tp1}</code>\n"
-        f"🎯 <b>TP 2 :</b>    <code>{tp2}</code>\n"
-        f"{'─'*28}\n"
-        f"📊 <b>Probabilité :</b>  {stars}\n"
-        f"⚖️ <b>R:R :</b>  1:{sig.rr}\n"
-        f"{'─'*28}\n"
-        f"<i>🕐 {ts}</i>"
+        f"<b>⭐ SMC SIGNALS PRO</b>\n"
+        f"🟢 <b>NOUVEAU SIGNAL {num_str}</b>\n"
+        f"<b>{sym_display}</b>\n"
+        f"{'─'*30}\n"
+        f"💎  <b>SETUP :</b> {mode}\n"
+        f"🎯  <b>DIRECTION :</b> <b>{dir_arrow}</b>\n"
+        f"💰  <b>ENTRY :</b> <code>{sig.entry}</code>\n"
+        f"{'─'*30}\n"
+        f"🎯  <b>TP1 :</b> <code>{sig.tp}</code>    <i>({sign(tp1_pct)}%)</i>\n"
+        f"🎯  <b>TP2 :</b> <code>{tp2}</code>    <i>({sign(tp2_pct)}%)</i>\n"
+        f"🎯  <b>TP3 :</b> <code>{tp3}</code>    <i>({sign(tp3_pct)}%)</i>\n"
+        f"🔴  <b>STOP LOSS :</b> <code>{sig.sl}</code>    <i>({sign(sl_pct)}%)</i>\n"
+        f"📊  <b>RISK / REWARD :</b> <b>1 : {sig.rr}</b>\n"
+        f"{'─'*30}\n"
+        f"✅ <b>CONFLUENCE SMC VALIDÉE</b>\n"
+        f"📈 Momentum {mom} + Structure {struct}\n"
+        f"🧠 Patience • Discipline • Liquidité\n\n"
+        f"<i>@smcsignalspro</i>"
     )
     return msg
+
+
+# ── Génération du graphique SMC ────────────────────────────────────────────
+def generate_chart_image(sig: "Signal") -> Optional[str]:
+    """Génère un graphique SMC dark-theme et retourne le chemin /tmp/*.png."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+        from matplotlib.lines  import Line2D
+
+        df = sig.df_chart
+        if df is None or len(df) < 10:
+            return None
+
+        df = df.tail(60).reset_index(drop=True)
+        n  = len(df)
+
+        BG = "#0a0c10"; BG2 = "#0d1117"
+        GREEN = "#22c55e"; RED = "#ef4444"
+        BLUE  = "#3b82f6"; PURPLE = "#a855f7"
+        GOLD  = "#f59e0b"; ORANGE = "#f97316"
+        GRAY  = "#64748b"; LGRAY  = "#94a3b8"
+        MONO  = "DejaVu Sans Mono"
+
+        fig, ax = plt.subplots(figsize=(12, 7), facecolor=BG)
+        ax.set_facecolor(BG2)
+        for s in ax.spines.values():
+            s.set_color("#1e293b")
+
+        prices = pd.concat([df["high"], df["low"]])
+        p_min  = prices.min() * 0.9994
+        p_max  = prices.max() * 1.0006
+
+        # Grid
+        import numpy as _np
+        for p in _np.linspace(p_min, p_max, 7):
+            ax.axhline(p, color="#1e293b", lw=0.5, ls="--", alpha=0.5)
+
+        # FVG
+        fvg = sig.fvg_chart
+        if fvg and p_min <= fvg.top <= p_max:
+            x0 = max(0, fvg.index - 2)
+            ax.add_patch(Rectangle((x0, fvg.bottom), n - x0, fvg.top - fvg.bottom,
+                facecolor=BLUE, alpha=0.15, zorder=1))
+            ax.add_patch(Rectangle((x0, fvg.bottom), n - x0, fvg.top - fvg.bottom,
+                edgecolor=BLUE, facecolor="none", lw=1, ls="--", alpha=0.6, zorder=2))
+            mid_y = (fvg.top + fvg.bottom) / 2
+            ax.text((x0 + min(x0 + 15, n)) / 2, mid_y, "FVG",
+                color=BLUE, fontsize=9, fontweight="bold", ha="center", va="center",
+                fontfamily=MONO, bbox=dict(fc=BG2, ec=BLUE, boxstyle="round,pad=0.2", alpha=0.9))
+
+        # OB
+        ob = sig.ob_chart
+        if ob and p_min <= ob.top <= p_max:
+            x0  = max(0, ob.index - 2)
+            x1  = min(n, ob.index + 10)
+            ax.add_patch(Rectangle((x0, ob.bottom), x1 - x0, ob.top - ob.bottom,
+                facecolor=PURPLE, alpha=0.18, zorder=1))
+            ax.add_patch(Rectangle((x0, ob.bottom), x1 - x0, ob.top - ob.bottom,
+                edgecolor=PURPLE, facecolor="none", lw=1.5, zorder=2))
+            mid_y = (ob.top + ob.bottom) / 2
+            ax.text((x0 + x1) / 2, mid_y, "OB",
+                color=PURPLE, fontsize=9, fontweight="bold", ha="center", va="center",
+                fontfamily=MONO, bbox=dict(fc=BG2, ec=PURPLE, boxstyle="round,pad=0.2", alpha=0.9))
+
+        # BOS
+        if sig.bos_lv and p_min <= sig.bos_lv <= p_max:
+            ax.axhline(sig.bos_lv, color=RED, lw=1.5, ls="--",
+                       xmin=0.0, xmax=0.55, zorder=3)
+            ax.text(n * 0.25, sig.bos_lv * (1 + 0.00015), "BOS",
+                color=RED, fontsize=9, fontweight="bold", fontfamily=MONO)
+
+        # CHoCH
+        if sig.choch_lv and p_min <= sig.choch_lv <= p_max:
+            ax.axhline(sig.choch_lv, color=ORANGE, lw=1.5, ls=":",
+                       xmin=0.50, xmax=0.80, zorder=3)
+            ax.text(n * 0.62, sig.choch_lv * (1 + 0.00015), "CHoCH",
+                color=ORANGE, fontsize=9, fontweight="bold", fontfamily=MONO)
+
+        # Niveaux TP / SL / Entry
+        dec = 2 if sig.entry > 100 else 5
+        if sig.direction == "LONG":
+            tp2 = round(sig.entry + 2.0 * (sig.tp - sig.entry), dec)
+            tp3 = round(sig.entry + 2.5 * (sig.tp - sig.entry), dec)
+        else:
+            tp2 = round(sig.entry - 2.0 * (sig.entry - sig.tp), dec)
+            tp3 = round(sig.entry - 2.5 * (sig.entry - sig.tp), dec)
+
+        for price, lbl, col in [
+            (tp3,       f"TP3 {tp3}",       GREEN),
+            (tp2,       f"TP2 {tp2}",       GREEN),
+            (sig.tp,    f"TP1 {sig.tp}",    GREEN),
+            (sig.entry, f"ENTRY {sig.entry}", GOLD),
+            (sig.sl,    f"SL {sig.sl}",      RED),
+        ]:
+            if p_min <= price <= p_max:
+                ax.axhline(price, color=col, lw=1.1, ls="--", alpha=0.85,
+                           xmin=0.45, zorder=2)
+                ax.text(n - 0.3, price, lbl, color=col, fontsize=8,
+                    va="center", ha="right", fontfamily=MONO,
+                    bbox=dict(fc=BG2, alpha=0.85, pad=1, ec="none"))
+
+        # Flèche d'entrée
+        entry_x = max(n - 12, n // 2)
+        dist     = abs(sig.entry - sig.sl)
+        if sig.direction == "LONG":
+            arr_start = sig.entry - dist * 0.6
+        else:
+            arr_start = sig.entry + dist * 0.6
+        ax.annotate("", xy=(entry_x, sig.entry), xytext=(entry_x, arr_start),
+            arrowprops=dict(arrowstyle="->", color=GREEN, lw=2.2))
+        ax.text(entry_x, arr_start - (p_max - p_min) * 0.005,
+            "ENTRY", color=GREEN, fontsize=8, ha="center",
+            fontweight="bold", fontfamily=MONO)
+
+        # Bougies
+        for i, row in df.iterrows():
+            o, h, l, cl = row["open"], row["high"], row["low"], row["close"]
+            up   = cl >= o
+            col  = GREEN if up else RED
+            bh   = max(abs(cl - o), (p_max - p_min) * 0.0008)
+            ax.plot([i, i], [l, h], color=col, lw=1.2, zorder=4)
+            ax.add_patch(Rectangle((i - 0.35, min(cl, o)), 0.7, bh,
+                fc=col if up else "none", ec=col, lw=1.2, zorder=5))
+
+        # Titre
+        sym_display = ({"GC=F": "XAUUSD", "SI=F": "XAGUSD", "BTC-USD": "BTCUSD",
+                        "CL=F": "USOIL",  "BZ=F": "UKOIL"}
+                       .get(sig.symbol,
+                            sig.symbol.replace("=X","").replace("-USD","").replace("^","")))
+        ax.text(0.015, 0.97, f"{sym_display}  •  M15",
+            transform=ax.transAxes, color=LGRAY, fontsize=11,
+            va="top", fontfamily=MONO)
+        ax.text(0.015, 0.89, "Smart Money Concepts",
+            transform=ax.transAxes, color=GRAY, fontsize=9,
+            va="top", fontfamily=MONO)
+
+        ax.set_xlim(-1, n + 1)
+        ax.set_ylim(p_min, p_max)
+        ax.tick_params(colors=GRAY, labelsize=8)
+        ax.yaxis.set_visible(False)
+        ax.set_xticks([])
+
+        plt.tight_layout(pad=0.4)
+        safe = (sig.symbol.replace("=X","").replace("-","")
+                          .replace("^","").replace(".",""))
+        path = f"/tmp/smc_{safe}_{int(time.time())}.png"
+        fig.savefig(path, dpi=130, bbox_inches="tight", facecolor=BG)
+        plt.close(fig)
+        return path
+
+    except Exception as e:
+        print(f"  [CHART] Erreur génération graphique : {e}")
+        return None
+
+
+# ── Envoi photo Telegram ───────────────────────────────────────────────────
+def tg_send_photo(image_path: str, caption: str, chat_id: str) -> bool:
+    """Envoie une image avec caption HTML via sendPhoto."""
+    try:
+        with open(image_path, "rb") as img:
+            r = requests.post(
+                _tg_url("sendPhoto"),
+                data={"chat_id": chat_id, "caption": caption,
+                      "parse_mode": "HTML"},
+                files={"photo": img},
+                timeout=30,
+            )
+        if r.status_code != 200:
+            print(f"  [TG] sendPhoto HTTP {r.status_code} : {r.text[:200]}")
+        return r.status_code == 200
+    except Exception as e:
+        print(f"  [TG] sendPhoto erreur : {e}")
+        return False
 
 
 def tg_notify(sig: "Signal", tier: str = "", mode: str = "SMC",
@@ -473,14 +685,41 @@ def tg_notify(sig: "Signal", tier: str = "", mode: str = "SMC",
     if not TELEGRAM_CHAT_ID:
         TELEGRAM_CHAT_ID = TELEGRAM_LEADER_ID
 
-    msg = tg_format_signal(sig, tier, mode)
+    # Numéro du signal
+    num = _next_signal_number()
+    msg = tg_format_signal(sig, tier, mode, signal_num=num)
 
-    # Envoi uniquement en DM au leader
-    if TELEGRAM_LEADER_ID:
-        ok = tg_send(msg, TELEGRAM_LEADER_ID)
-        print(c(f"  [TG] {'✓ DM leader' if ok else '✗ DM leader échoué'}", "green" if ok else "red"))
+    # Générer le graphique
+    chart_path = generate_chart_image(sig)
+
+    # ── Envoi au GROUPE (photo + caption) ────────────────────────
+    if TELEGRAM_GROUP_ID:
+        if chart_path:
+            ok_grp = tg_send_photo(chart_path, msg, TELEGRAM_GROUP_ID)
+            print(c(f"  [TG] {'✓ Groupe (photo)' if ok_grp else '✗ Groupe photo échoué'}", "green" if ok_grp else "red"))
+        else:
+            ok_grp = tg_send(msg, TELEGRAM_GROUP_ID)
+            print(c(f"  [TG] {'✓ Groupe (texte)' if ok_grp else '✗ Groupe texte échoué'}", "green" if ok_grp else "red"))
     else:
-        print(c("  [TG] ⚠ Aucun ID leader — ajoute TG_LEADER_ID dans Render", "red"))
+        print(c("  [TG] ⚠ TELEGRAM_GROUP_ID non défini", "red"))
+
+    # ── Envoi en DM au leader ─────────────────────────────────────
+    if TELEGRAM_LEADER_ID:
+        if chart_path:
+            ok_dm = tg_send_photo(chart_path, msg, TELEGRAM_LEADER_ID)
+        else:
+            ok_dm = tg_send(msg, TELEGRAM_LEADER_ID)
+        print(c(f"  [TG] {'✓ DM leader' if ok_dm else '✗ DM leader échoué'}", "green" if ok_dm else "red"))
+    else:
+        print(c("  [TG] ⚠ Aucun ID leader — ajoute TG_LEADER_ID dans Render", "yellow"))
+
+    # Nettoyage fichier temporaire
+    if chart_path:
+        try:
+            import os as _os
+            _os.remove(chart_path)
+        except Exception:
+            pass
 
 
 # ═════════════════════════════════════════════════════════════
@@ -548,6 +787,12 @@ class Signal:
     risk_usd:  float = RISK_USD
     mode:      str   = "SMC"   # "SMC" | "AMD" | "SEPTUPLE" | "SD" | "PRE-BOS"
     reasons:   list  = field(default_factory=list)
+    # Champs pour la génération du graphique
+    df_chart:   object = field(default=None, repr=False)   # pd.DataFrame M5
+    fvg_chart:  object = field(default=None, repr=False)   # FVG | None
+    ob_chart:   object = field(default=None, repr=False)   # OrderBlock | None
+    bos_lv:     float  = 0.0
+    choch_lv:   float  = 0.0
 
 
 # ═════════════════════════════════════════════════════════════
@@ -2740,6 +2985,22 @@ def analyse(symbol: str, htf: str = HTF, ltf: str = LTF,
 
     lot = compute_lot(symbol, entry, sl)
 
+    # Récupérer le niveau BOS depuis les raisons (MTF)
+    _bos_lv = 0.0
+    for r in reasons:
+        if "BOS" in r:
+            try:
+                import re as _re
+                nums = _re.findall(r"[\d.]+", r)
+                if nums:
+                    _bos_lv = float(nums[-1])
+                    break
+            except Exception:
+                pass
+
+    # Niveau CHoCH depuis choch_eql si disponible
+    _choch_lv = float(choch_eql.get("choch_level", 0.0)) if isinstance(choch_eql, dict) else 0.0
+
     signal = Signal(
         symbol    = symbol,
         direction = direction,
@@ -2754,6 +3015,12 @@ def analyse(symbol: str, htf: str = HTF, ltf: str = LTF,
         risk_usd  = RISK_USD,
         mode      = mode,
         reasons   = reasons,
+        # Données graphique
+        df_chart  = df_ltf,
+        fvg_chart = fvg_active,
+        ob_chart  = ob_for_sl,
+        bos_lv    = _bos_lv,
+        choch_lv  = _choch_lv,
     )
 
     if not silent:
@@ -3336,3 +3603,4 @@ if __name__ == "__main__":
     else:
         run_live(cat=args.cat, min_score=args.min_score,
                  min_rr=args.min_rr, interval=args.interval)
+
