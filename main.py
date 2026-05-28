@@ -131,10 +131,10 @@ def index():
     <tr><td>Score minimum</td><td>{SCORE_THRESHOLD}/100</td></tr>
     <tr><td>RR minimum</td><td>1:{MIN_RR}</td></tr>
     <tr><td>Risque/trade</td><td>${RISK_USD}</td></tr>
-    <tr><td>Timeframes</td><td>H4 → M15 → M5</td></tr>
+    <tr><td>Timeframes</td><td>H4 → H1 → M15</td></tr>
     <tr><td>Modes</td><td>SMC + AMD + Septuple + Supply/Demand + 4H Sweep+5M Shift + CHoCH+EQL</td></tr>
     <tr><td>BTC</td><td>🟢 Scan 24/7 (weekends inclus)</td></tr>
-    <tr><td>Intervalle scan</td><td>30 secondes</td></tr>
+    <tr><td>Intervalle scan</td><td>5 minutes</td></tr>
   </table>
 </body>
 </html>"""
@@ -182,15 +182,15 @@ except ImportError:
 #  CONFIGURATION GLOBALE
 # ═════════════════════════════════════════════════════════════
 HTF             = "4h"    # ← H4 : biais institutionnel + AMD + Septuple Traction
-MTF             = "15m"   # M15 : confirmation structure
-LTF             = "5m"    # M5  : entrée précise
+MTF             = "1h"    # H1  : confirmation structure
+LTF             = "15m"   # M15 : entrée précise
 
 FVG_MIN_RATIO   = 0.0002
 OB_LOOKBACK     = 5
 LIQ_THRESHOLD   = 0.0004
 SCORE_THRESHOLD = 80
 MIN_RR          = 2.0
-RISK_USD        = 25.0
+RISK_USD        = 100.0
 
 # ── Septuple Traction : N bougies consécutives minimum ───────
 SEPTUPLE_MIN_CANDLES = 5   # 5 suffisent en practice (7 = très rare)
@@ -251,10 +251,17 @@ def check_volatility(symbol: str, df_ltf: pd.DataFrame) -> tuple[bool, str]:
     if df_ltf.empty or len(df_ltf) < 14:
         return False, "données insuffisantes"
     atr = (df_ltf["high"] - df_ltf["low"]).rolling(14).mean().iloc[-1]
-    atr_min = ATR_MIN.get(symbol, ATR_MIN_DEFAULT)
-    spread  = get_spread(symbol)
-    if atr < atr_min * 0.7:
-        return False, f"ATR trop faible ({round(atr, 5)} < {round(atr_min*0.7,5)})"
+
+    # ATR dynamique : moyenne 100 bougies × 0.6 (s'adapte aux conditions de marché)
+    atr_mean = (df_ltf["high"] - df_ltf["low"]).rolling(100).mean().iloc[-1]
+    if not pd.isna(atr_mean) and atr_mean > 0:
+        atr_min = atr_mean * 0.6
+    else:
+        atr_min = ATR_MIN.get(symbol, ATR_MIN_DEFAULT) * 0.7
+
+    spread = get_spread(symbol)
+    if atr < atr_min:
+        return False, f"ATR trop faible ({round(atr, 5)} < {round(atr_min, 5)})"
     ratio = spread / atr if atr > 0 else 1.0
     if ratio > MAX_SPREAD_ATR_RATIO:
         return False, f"spread/ATR={round(ratio*100,1)}% > {int(MAX_SPREAD_ATR_RATIO*100)}%"
@@ -340,7 +347,7 @@ def correlation_guard(symbol: str, direction: str) -> tuple[bool, str]:
 # ─────────────────────────────────────────────────────────────
 #  TELEGRAM
 # ─────────────────────────────────────────────────────────────
-_TG_TOKEN_ENV = os.environ.get("TG_TOKEN", "8665812395:AAFO4BMTIrBCQJYVL8UytO028TcB1sDfgbI")
+_TG_TOKEN_ENV = os.environ.get("TG_TOKEN", "")
 if not _TG_TOKEN_ENV:
     raise EnvironmentError(
         "Variable d'environnement TG_TOKEN manquante.\n"
@@ -518,7 +525,7 @@ def generate_chart_image(sig: "Signal") -> Optional[str]:
         GRAY  = "#64748b"; LGRAY  = "#94a3b8"
         MONO  = "DejaVu Sans Mono"
 
-        fig, ax = plt.subplots(figsize=(12, 7), facecolor=BG)
+        fig, ax = plt.subplots(figsize=(40, 22), facecolor=BG)
         ax.set_facecolor(BG2)
         for s in ax.spines.values():
             s.set_color("#1e293b")
@@ -529,8 +536,8 @@ def generate_chart_image(sig: "Signal") -> Optional[str]:
 
         # Grid
         import numpy as _np
-        for p in _np.linspace(p_min, p_max, 7):
-            ax.axhline(p, color="#1e293b", lw=0.5, ls="--", alpha=0.5)
+        for p in _np.linspace(p_min, p_max, 10):
+            ax.axhline(p, color="#1e293b", lw=0.8, ls="--", alpha=0.5)
 
         # FVG
         fvg = sig.fvg_chart
@@ -539,11 +546,11 @@ def generate_chart_image(sig: "Signal") -> Optional[str]:
             ax.add_patch(Rectangle((x0, fvg.bottom), n - x0, fvg.top - fvg.bottom,
                 facecolor=BLUE, alpha=0.15, zorder=1))
             ax.add_patch(Rectangle((x0, fvg.bottom), n - x0, fvg.top - fvg.bottom,
-                edgecolor=BLUE, facecolor="none", lw=1, ls="--", alpha=0.6, zorder=2))
+                edgecolor=BLUE, facecolor="none", lw=2, ls="--", alpha=0.6, zorder=2))
             mid_y = (fvg.top + fvg.bottom) / 2
             ax.text((x0 + min(x0 + 15, n)) / 2, mid_y, "FVG",
-                color=BLUE, fontsize=9, fontweight="bold", ha="center", va="center",
-                fontfamily=MONO, bbox=dict(fc=BG2, ec=BLUE, boxstyle="round,pad=0.2", alpha=0.9))
+                color=BLUE, fontsize=22, fontweight="bold", ha="center", va="center",
+                fontfamily=MONO, bbox=dict(fc=BG2, ec=BLUE, boxstyle="round,pad=0.4", alpha=0.9))
 
         # OB
         ob = sig.ob_chart
@@ -553,25 +560,25 @@ def generate_chart_image(sig: "Signal") -> Optional[str]:
             ax.add_patch(Rectangle((x0, ob.bottom), x1 - x0, ob.top - ob.bottom,
                 facecolor=PURPLE, alpha=0.18, zorder=1))
             ax.add_patch(Rectangle((x0, ob.bottom), x1 - x0, ob.top - ob.bottom,
-                edgecolor=PURPLE, facecolor="none", lw=1.5, zorder=2))
+                edgecolor=PURPLE, facecolor="none", lw=2.5, zorder=2))
             mid_y = (ob.top + ob.bottom) / 2
             ax.text((x0 + x1) / 2, mid_y, "OB",
-                color=PURPLE, fontsize=9, fontweight="bold", ha="center", va="center",
-                fontfamily=MONO, bbox=dict(fc=BG2, ec=PURPLE, boxstyle="round,pad=0.2", alpha=0.9))
+                color=PURPLE, fontsize=22, fontweight="bold", ha="center", va="center",
+                fontfamily=MONO, bbox=dict(fc=BG2, ec=PURPLE, boxstyle="round,pad=0.4", alpha=0.9))
 
         # BOS
         if sig.bos_lv and p_min <= sig.bos_lv <= p_max:
-            ax.axhline(sig.bos_lv, color=RED, lw=1.5, ls="--",
+            ax.axhline(sig.bos_lv, color=RED, lw=2.5, ls="--",
                        xmin=0.0, xmax=0.55, zorder=3)
             ax.text(n * 0.25, sig.bos_lv * (1 + 0.00015), "BOS",
-                color=RED, fontsize=9, fontweight="bold", fontfamily=MONO)
+                color=RED, fontsize=20, fontweight="bold", fontfamily=MONO)
 
         # CHoCH
         if sig.choch_lv and p_min <= sig.choch_lv <= p_max:
-            ax.axhline(sig.choch_lv, color=ORANGE, lw=1.5, ls=":",
+            ax.axhline(sig.choch_lv, color=ORANGE, lw=2.5, ls=":",
                        xmin=0.50, xmax=0.80, zorder=3)
             ax.text(n * 0.62, sig.choch_lv * (1 + 0.00015), "CHoCH",
-                color=ORANGE, fontsize=9, fontweight="bold", fontfamily=MONO)
+                color=ORANGE, fontsize=20, fontweight="bold", fontfamily=MONO)
 
         # Niveaux TP / SL / Entry
         dec = 2 if sig.entry > 100 else 5
@@ -583,18 +590,18 @@ def generate_chart_image(sig: "Signal") -> Optional[str]:
             tp3 = round(sig.entry - 2.5 * (sig.entry - sig.tp), dec)
 
         for price, lbl, col in [
-            (tp3,       f"TP3 {tp3}",       GREEN),
-            (tp2,       f"TP2 {tp2}",       GREEN),
-            (sig.tp,    f"TP1 {sig.tp}",    GREEN),
-            (sig.entry, f"ENTRY {sig.entry}", GOLD),
-            (sig.sl,    f"SL {sig.sl}",      RED),
+            (tp3,       f"TP3 {tp3}",         GREEN),
+            (tp2,       f"TP2 {tp2}",         GREEN),
+            (sig.tp,    f"TP1 {sig.tp}",      GREEN),
+            (sig.entry, f"ENTRY {sig.entry}",  GOLD),
+            (sig.sl,    f"SL {sig.sl}",        RED),
         ]:
             if p_min <= price <= p_max:
-                ax.axhline(price, color=col, lw=1.1, ls="--", alpha=0.85,
+                ax.axhline(price, color=col, lw=2.0, ls="--", alpha=0.85,
                            xmin=0.45, zorder=2)
-                ax.text(n - 0.3, price, lbl, color=col, fontsize=8,
+                ax.text(n - 0.3, price, lbl, color=col, fontsize=18,
                     va="center", ha="right", fontfamily=MONO,
-                    bbox=dict(fc=BG2, alpha=0.85, pad=1, ec="none"))
+                    bbox=dict(fc=BG2, alpha=0.85, pad=2, ec="none"))
 
         # Flèche d'entrée
         entry_x = max(n - 12, n // 2)
@@ -604,9 +611,9 @@ def generate_chart_image(sig: "Signal") -> Optional[str]:
         else:
             arr_start = sig.entry + dist * 0.6
         ax.annotate("", xy=(entry_x, sig.entry), xytext=(entry_x, arr_start),
-            arrowprops=dict(arrowstyle="->", color=GREEN, lw=2.2))
+            arrowprops=dict(arrowstyle="->", color=GREEN, lw=3.5))
         ax.text(entry_x, arr_start - (p_max - p_min) * 0.005,
-            "ENTRY", color=GREEN, fontsize=8, ha="center",
+            "ENTRY", color=GREEN, fontsize=18, ha="center",
             fontweight="bold", fontfamily=MONO)
 
         # Bougies
@@ -615,9 +622,9 @@ def generate_chart_image(sig: "Signal") -> Optional[str]:
             up   = cl >= o
             col  = GREEN if up else RED
             bh   = max(abs(cl - o), (p_max - p_min) * 0.0008)
-            ax.plot([i, i], [l, h], color=col, lw=1.2, zorder=4)
+            ax.plot([i, i], [l, h], color=col, lw=2.0, zorder=4)
             ax.add_patch(Rectangle((i - 0.35, min(cl, o)), 0.7, bh,
-                fc=col if up else "none", ec=col, lw=1.2, zorder=5))
+                fc=col if up else "none", ec=col, lw=2.0, zorder=5))
 
         # Titre
         sym_display = ({"GC=F": "XAUUSD", "SI=F": "XAGUSD", "BTC-USD": "BTCUSD",
@@ -625,23 +632,23 @@ def generate_chart_image(sig: "Signal") -> Optional[str]:
                        .get(sig.symbol,
                             sig.symbol.replace("=X","").replace("-USD","").replace("^","")))
         ax.text(0.015, 0.97, f"{sym_display}  •  M15",
-            transform=ax.transAxes, color=LGRAY, fontsize=11,
-            va="top", fontfamily=MONO)
-        ax.text(0.015, 0.89, "Smart Money Concepts",
-            transform=ax.transAxes, color=GRAY, fontsize=9,
+            transform=ax.transAxes, color=LGRAY, fontsize=28,
+            va="top", fontfamily=MONO, fontweight="bold")
+        ax.text(0.015, 0.91, "Smart Money Concepts",
+            transform=ax.transAxes, color=GRAY, fontsize=20,
             va="top", fontfamily=MONO)
 
         ax.set_xlim(-1, n + 1)
         ax.set_ylim(p_min, p_max)
-        ax.tick_params(colors=GRAY, labelsize=8)
+        ax.tick_params(colors=GRAY, labelsize=16)
         ax.yaxis.set_visible(False)
         ax.set_xticks([])
 
-        plt.tight_layout(pad=0.4)
+        plt.tight_layout(pad=0.6)
         safe = (sig.symbol.replace("=X","").replace("-","")
                           .replace("^","").replace(".",""))
         path = f"/tmp/smc_{safe}_{int(time.time())}.png"
-        fig.savefig(path, dpi=130, bbox_inches="tight", facecolor=BG)
+        fig.savefig(path, dpi=220, bbox_inches="tight", facecolor=BG)
         plt.close(fig)
         return path
 
@@ -674,11 +681,6 @@ def tg_notify(sig: "Signal", tier: str = "", mode: str = "SMC",
               chat_id: Optional[str] = None) -> None:
     global TELEGRAM_CHAT_ID, TELEGRAM_LEADER_ID
 
-    if is_setup_already_sent(sig.symbol, sig.direction, sig.score):
-        print(c(f"  [TG] ⏭ Setup déjà envoyé — {sig.symbol} {sig.direction}", "yellow"))
-        return
-    mark_setup_sent(sig.symbol, sig.direction, sig.score)
-
     # Récupérer l'ID leader si pas encore connu
     if not TELEGRAM_LEADER_ID:
         TELEGRAM_LEADER_ID = tg_get_chat_id() or ""
@@ -692,18 +694,7 @@ def tg_notify(sig: "Signal", tier: str = "", mode: str = "SMC",
     # Générer le graphique
     chart_path = generate_chart_image(sig)
 
-    # ── Envoi au GROUPE (photo + caption) ────────────────────────
-    if TELEGRAM_GROUP_ID:
-        if chart_path:
-            ok_grp = tg_send_photo(chart_path, msg, TELEGRAM_GROUP_ID)
-            print(c(f"  [TG] {'✓ Groupe (photo)' if ok_grp else '✗ Groupe photo échoué'}", "green" if ok_grp else "red"))
-        else:
-            ok_grp = tg_send(msg, TELEGRAM_GROUP_ID)
-            print(c(f"  [TG] {'✓ Groupe (texte)' if ok_grp else '✗ Groupe texte échoué'}", "green" if ok_grp else "red"))
-    else:
-        print(c("  [TG] ⚠ TELEGRAM_GROUP_ID non défini", "red"))
-
-    # ── Envoi en DM au leader ─────────────────────────────────────
+    # ── Envoi en DM au leader — TOUJOURS (pas de filtre doublon) ─────
     if TELEGRAM_LEADER_ID:
         if chart_path:
             ok_dm = tg_send_photo(chart_path, msg, TELEGRAM_LEADER_ID)
@@ -712,6 +703,21 @@ def tg_notify(sig: "Signal", tier: str = "", mode: str = "SMC",
         print(c(f"  [TG] {'✓ DM leader' if ok_dm else '✗ DM leader échoué'}", "green" if ok_dm else "red"))
     else:
         print(c("  [TG] ⚠ Aucun ID leader — ajoute TG_LEADER_ID dans Render", "yellow"))
+
+    # ── Envoi au GROUPE — filtre doublon actif ────────────────────────
+    if is_setup_already_sent(sig.symbol, sig.direction, sig.score):
+        print(c(f"  [TG] ⏭ Groupe — setup déjà envoyé ({sig.symbol} {sig.direction})", "yellow"))
+    else:
+        mark_setup_sent(sig.symbol, sig.direction, sig.score)
+        if TELEGRAM_GROUP_ID:
+            if chart_path:
+                ok_grp = tg_send_photo(chart_path, msg, TELEGRAM_GROUP_ID)
+                print(c(f"  [TG] {'✓ Groupe (photo)' if ok_grp else '✗ Groupe photo échoué'}", "green" if ok_grp else "red"))
+            else:
+                ok_grp = tg_send(msg, TELEGRAM_GROUP_ID)
+                print(c(f"  [TG] {'✓ Groupe (texte)' if ok_grp else '✗ Groupe texte échoué'}", "green" if ok_grp else "red"))
+        else:
+            print(c("  [TG] ⚠ TELEGRAM_GROUP_ID non défini", "red"))
 
     # Nettoyage fichier temporaire
     if chart_path:
@@ -846,30 +852,36 @@ def compute_lot(symbol: str, entry: float, sl: float,
 
 def fetch(symbol: str, interval: str, period: str = "5d",
           retries: int = 3, retry_delay: int = 15) -> pd.DataFrame:
-    for attempt in range(1, retries + 1):
-        try:
+    # Fallback sur plusieurs périodes si yfinance échoue
+    periods_fallback = list(dict.fromkeys([period, "5d", "10d", "1mo"]))
+    for p in periods_fallback:
+        for attempt in range(1, retries + 1):
             try:
-                df = yf.download(symbol, interval=interval, period=period,
-                                 auto_adjust=True, progress=False,
-                                 multi_level_index=False)
-            except TypeError:
-                df = yf.download(symbol, interval=interval, period=period,
-                                 auto_adjust=True, progress=False)
-            if df.empty:
-                return df
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0).str.lower()
-            else:
-                df.columns = df.columns.str.lower()
-            df.dropna(inplace=True)
-            return df
-        except Exception as e:
-            err_str = str(e).lower()
-            if ("rate" in err_str or "too many" in err_str or "429" in err_str) \
-                    and attempt < retries:
+                try:
+                    df = yf.download(symbol, interval=interval, period=p,
+                                     auto_adjust=True, progress=False,
+                                     threads=False,
+                                     multi_level_index=False)
+                except TypeError:
+                    df = yf.download(symbol, interval=interval, period=p,
+                                     auto_adjust=True, progress=False,
+                                     threads=False)
+                if not df.empty:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0).str.lower()
+                    else:
+                        df.columns = df.columns.str.lower()
+                    df.dropna(inplace=True)
+                    return df
                 time.sleep(retry_delay * attempt)
-                continue
-            return pd.DataFrame()
+            except Exception as e:
+                err_str = str(e).lower()
+                if ("rate" in err_str or "too many" in err_str or "429" in err_str) \
+                        and attempt < retries:
+                    time.sleep(retry_delay * attempt)
+                    continue
+                time.sleep(retry_delay)
+        # Période échouée → on tente la suivante
     return pd.DataFrame()
 
 
@@ -3242,7 +3254,7 @@ def startup_check() -> bool:
         f"🟢 <b>SMC Signal Engine v3 — DÉMARRÉ</b>\n"
         f"{'─'*30}\n"
         f"<b>🕐 Heure :</b> <code>{ts_start}</code>\n"
-        f"<b>📊 Timeframes :</b> H4 → M15 → M5\n"
+        f"<b>📊 Timeframes :</b> H4 → H1 → M15\n"
         f"<b>⚙️ Score min :</b> {SCORE_THRESHOLD}/100\n"
         f"<b>⚖️ RR min :</b> 1:{MIN_RR}\n"
         f"<b>💰 Risque/trade :</b> ${RISK_USD}\n"
@@ -3251,16 +3263,17 @@ def startup_check() -> bool:
         f"<b>₿ BTC :</b> Scan 24/7 (weekends inclus) ✅\n"
         f"{'─'*30}\n"
         f"✅ Bot connecté · yfinance {'OK' if yf_ok else '⚠ indispo'}\n"
-        f"🔍 Scan actif toutes les 30s"
+        f"🔍 Scan actif toutes les 5 minutes"
     )
+    # ── Message de démarrage → DM leader uniquement (pas dans le groupe) ────
     try:
-        if TELEGRAM_GROUP_ID:
+        if TELEGRAM_LEADER_ID:
             requests.post(_tg_url("sendMessage"), json={
-                "chat_id": TELEGRAM_GROUP_ID,
+                "chat_id": TELEGRAM_LEADER_ID,
                 "text": startup_msg,
                 "parse_mode": "HTML",
             }, timeout=10)
-            log.info("  ✓ Message de démarrage envoyé sur Telegram")
+            log.info("  ✓ Message de démarrage envoyé en DM au leader")
     except Exception as e:
         log.warning(f"  ⚠ Envoi startup Telegram échoué : {e}")
 
@@ -3559,8 +3572,8 @@ if __name__ == "__main__":
                         help="Scan unique (test local)")
     parser.add_argument("--min-score", type=int,   default=SCORE_THRESHOLD)
     parser.add_argument("--min-rr",    type=float, default=MIN_RR)
-    parser.add_argument("--interval",  type=int,   default=30,
-                        help="Intervalle scan secondes (défaut: 30)")
+    parser.add_argument("--interval",  type=int,   default=300,
+                        help="Intervalle scan secondes (défaut: 300 = 5 minutes)")
     args = parser.parse_args()
 
     # ── Flask dashboard ───────────────────────────────────────
@@ -3572,23 +3585,6 @@ if __name__ == "__main__":
 
     # ── Self-ping anti-veille Render ──────────────────────────
     start_self_ping(flask_port)
-
-    # ── Message de démarrage en DM au leader ──────────────────
-    ts_start = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
-    if not TELEGRAM_LEADER_ID:
-        TELEGRAM_LEADER_ID = tg_get_chat_id() or ""
-    if TELEGRAM_LEADER_ID:
-        tg_send(
-            f"✅ <b>SMC Signal Engine v5+3 FUSION démarré</b>\n"
-            f"🕐 {ts_start}\n"
-            f"📊 Marchés : {args.cat.upper()}\n"
-            f"🎯 Score min : {args.min_score}  |  RR min : 1:{args.min_rr}\n"
-            f"⭐ Modes : SMC_TRADER ★ + AMD + Septuple + S/D\n"
-            f"⏱ Intervalle : {args.interval}s\n"
-            f"🟢 En attente de signaux…",
-            TELEGRAM_LEADER_ID,
-        )
-        log.info("  ✓ Message de démarrage envoyé en DM au leader")
 
     # ── Mode selon arguments ──────────────────────────────────
     if args.symbol:
