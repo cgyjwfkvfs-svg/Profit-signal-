@@ -1,3 +1,4 @@
+
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
 ║         SMC SIGNAL ENGINE  v3  — Smart Money Concepts ELITE             ║
@@ -359,15 +360,17 @@ def correlation_guard(symbol: str, direction: str) -> tuple[bool, str]:
 # ─────────────────────────────────────────────────────────────
 #  TELEGRAM
 # ─────────────────────────────────────────────────────────────
-_TG_TOKEN_ENV = os.environ.get("TG_TOKEN", "")
+_TG_TOKEN_ENV = os.environ.get("TG_TOKEN", "8665812395:AAFO4BMTIrBCQJYVL8UytO028TcB1sDfgbI")
+# TG_ENABLED : true automatiquement si TG_TOKEN est défini, sauf si explicitement désactivé
+_TG_ENABLED   = bool(_TG_TOKEN_ENV) if os.environ.get("TG_ENABLED", "") == "" else \
+                os.environ.get("TG_ENABLED", "false").lower() == "true"
+
 if not _TG_TOKEN_ENV:
-    raise EnvironmentError(
-        "Variable d'environnement TG_TOKEN manquante.\n"
-        "Définissez-la dans Render → Environment : TG_TOKEN=<votre_token>"
-    )
-TELEGRAM_TOKEN    = _TG_TOKEN_ENV
-TELEGRAM_CHAT_ID  = None
-TELEGRAM_GROUP_ID = "-1002335466840"
+    print("  [TG] ⚠  TG_TOKEN absent — envoi Telegram désactivé")
+
+TELEGRAM_TOKEN     = _TG_TOKEN_ENV
+TELEGRAM_CHAT_ID   = None
+TELEGRAM_GROUP_ID  = "-1002335466840"
 TELEGRAM_LEADER_ID = os.environ.get("TG_LEADER_ID", "6982051442")
 
 SIGNAL_COOLDOWN = 600
@@ -741,7 +744,7 @@ def tg_notify(sig: "Signal", tier: str = "", mode: str = "SMC",
     global TELEGRAM_CHAT_ID, TELEGRAM_LEADER_ID
 
     # ── FLAG GLOBAL — mettre TG_ENABLED = True pour activer l'envoi ──
-    TG_ENABLED = os.environ.get("TG_ENABLED", "false").lower() == "true"
+    TG_ENABLED = _TG_ENABLED
     if not TG_ENABLED:
         # Log local uniquement — aucun appel API Telegram
         num = _next_signal_number()
@@ -3728,4 +3731,3 @@ if __name__ == "__main__":
     else:
         run_live(cat=args.cat, min_score=args.min_score,
                  min_rr=args.min_rr, interval=args.interval)
-
