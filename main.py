@@ -1,4 +1,3 @@
-
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
 ║         SMC SIGNAL ENGINE  v3  — Smart Money Concepts ELITE             ║
@@ -221,6 +220,10 @@ def is_weekend() -> bool:
     """Retourne True si on est samedi ou dimanche (UTC)."""
     return datetime.now(timezone.utc).weekday() >= 5   # 5=Sat, 6=Sun
 
+
+def is_crypto_symbol(symbol: str) -> bool:
+    """BTC et autres crypto tradent 24/7, y compris le weekend."""
+    return symbol in ("BTC-USD", "ETH-USD", "BTC-USDT", "ETH-USDT")
 
 GOLD_SYMBOLS = {"GC=F", "SI=F", "CL=F", "BZ=F"}
 
@@ -3460,16 +3463,35 @@ def run_live(cat: str = "forex", min_score: int = SCORE_THRESHOLD,
             now_utc  = datetime.now(timezone.utc)
             now_str  = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
 
-            if is_weekend() or not is_session_active():
-                # ── Weekend ou hors session ──────────────────────────
-                # BTC/crypto tradent 24/7 → on garde uniquement BTC
+            if is_weekend():
+                # ── Weekend : BTC 24/7 + Gold si dimanche soir ≥ 23h ──
+                always_on = [
+                    (s, m) for s, m in symbols
+                    if is_crypto_symbol(s) or (s in GOLD_SYMBOLS and is_gold_session_active())
+                ]
+                if always_on:
+                    symbols_to_scan = always_on
+                    if cycle_n % 10 == 1:
+                        names = ", ".join(s for s, _ in always_on)
+                        log.info(f"  🌙 [{cycle_n}] {now_utc.strftime('%H:%M UTC')} "
+                                 f"— Weekend  |  Scan actif : {names}")
+                else:
+                    if cycle_n % 10 == 1:
+                        log.info(f"  💤 [{cycle_n}] {now_utc.strftime('%H:%M UTC')} — Weekend — attente")
+                    with _STATUS_LOCK:
+                        _STATUS["cycle"] = cycle_n
+                        _STATUS["last_scan"] = now_str
+                        _STATUS["scan_running"] = False
+                    time.sleep(interval)
+                    continue
+            elif not is_session_active():
+                # ── Hors session (nuit semaine) : BTC uniquement ───────
                 btc_only = [(s, m) for s, m in symbols if is_crypto_symbol(s)]
                 if btc_only:
-                    # On scanne BTC même le weekend
                     symbols_to_scan = btc_only
                     if cycle_n % 10 == 1:
-                        log.info(f"  🌙 [{cycle_n}] {now_utc.strftime('%H:%M UTC')} "
-                                 f"— Hors session Forex/Gold  |  BTC scan actif ✓")
+                        log.info(f"  💤 [{cycle_n}] {now_utc.strftime('%H:%M UTC')} "
+                                 f"— Hors session — attente")
                 else:
                     if cycle_n % 10 == 1:
                         log.info(f"  💤 [{cycle_n}] {now_utc.strftime('%H:%M UTC')} — Hors session — attente")
@@ -3731,3 +3753,4 @@ if __name__ == "__main__":
     else:
         run_live(cat=args.cat, min_score=args.min_score,
                  min_rr=args.min_rr, interval=args.interval)
+
