@@ -189,7 +189,7 @@ FVG_MIN_RATIO   = 0.0002
 OB_LOOKBACK     = 5
 LIQ_THRESHOLD   = 0.0004
 SCORE_THRESHOLD = 80
-MIN_RR          = 2.0
+MIN_RR          = 3.0
 RISK_USD        = 100.0
 
 # ── Septuple Traction : N bougies consécutives minimum ───────
@@ -221,9 +221,16 @@ def is_weekend() -> bool:
     return datetime.now(timezone.utc).weekday() >= 5   # 5=Sat, 6=Sun
 
 
-def is_crypto_symbol(symbol: str) -> bool:
-    """BTC et autres crypto tradent 24/7, y compris le weekend."""
-    return symbol in ("BTC-USD", "ETH-USD", "BTC-USDT", "ETH-USDT")
+GOLD_SYMBOLS = {"GC=F", "SI=F", "CL=F", "BZ=F"}
+
+def is_gold_session_active() -> bool:
+    """Gold trade aussi le dimanche soir dès 23h00 UTC."""
+    now = datetime.now(timezone.utc)
+    if now.weekday() == 5:   # samedi → fermé
+        return False
+    if now.weekday() == 6:   # dimanche → ouvert à partir de 23h UTC
+        return now.hour >= 23
+    return True  # lundi–vendredi toujours ouvert
 
 
 # ─────────────────────────────────────────────────────────────
@@ -268,8 +275,13 @@ def check_volatility(symbol: str, df_ltf: pd.DataFrame) -> tuple[bool, str]:
     # Les cryptos (BTC) tradent 24/7 — pas de filtre session
     if is_crypto_symbol(symbol):
         return True, ""
+    # Gold/matières premières : filtre session spécifique (dim soir ok)
+    if symbol in GOLD_SYMBOLS:
+        if not is_gold_session_active():
+            return False, "weekend — Gold fermé (sam + dim avant 23h UTC)"
+        return True, ""
     if is_weekend():
-        return False, "weekend — marché fermé (Forex/Gold)"
+        return False, "weekend — marché fermé (Forex)"
     if not is_session_active():
         return False, "hors session (London/NY)"
     return True, ""
@@ -347,7 +359,7 @@ def correlation_guard(symbol: str, direction: str) -> tuple[bool, str]:
 # ─────────────────────────────────────────────────────────────
 #  TELEGRAM
 # ─────────────────────────────────────────────────────────────
-_TG_TOKEN_ENV = os.environ.get("TG_TOKEN", "8665812395:AAFO4BMTIrBCQJYVL8UytO028TcB1sDfgbI")
+_TG_TOKEN_ENV = os.environ.get("TG_TOKEN", "")
 if not _TG_TOKEN_ENV:
     raise EnvironmentError(
         "Variable d'environnement TG_TOKEN manquante.\n"
@@ -447,24 +459,60 @@ def tg_format_signal(sig: "Signal", tier: str = "", mode: str = "SMC",
     """Format Telegram correspondant au screenshot du groupe SMC SIGNALS PRO."""
     dec = 2 if sig.entry > 100 else 5
 
+    risk = abs(sig.entry - sig.sl)
+
+    # RR réels calculés sur les cibles structurelles
+    def _rr(tp_val: float) -> str:
+        if risk <= 0:
+            return "—"
+        if sig.direction == "LONG":
+            r = (tp_val - sig.entry) / risk
+        else:
+            r = (sig.entry - tp_val) / risk
+        return f"1:{round(r, 1)}"
+
+    def _pct(tp_val: float) -> str:
+        if sig.entry <= 0:
+            return "—"
+        v = (tp_val - sig.entry) / sig.entry * 100
+        return f"+{round(v,2)}%" if v > 0 else f"{round(v,2)}%"
+
+    def _sl_pct() -> str:
+        if sig.entry <= 0:
+            return "—"
+        v = (sig.sl - sig.entry) / sig.entry * 100
+        return f"+{round(v,2)}%" if v > 0 else f"{round(v,2)}%"
+
+    # Lot basé sur SL distance réelle pour $100 de risque
+    base_lot = compute_lot(sig.symbol, sig.entry, sig.sl, risk_usd=100.0)
+
+    # TP2 et TP3 structurels (depuis sig, sinon fallback mathématique)
+    tp2 = sig.tp2 if sig.tp2 and sig.tp2 != sig.tp else (
+        round(sig.entry + 3 * risk, dec) if sig.direction == "LONG"
+        else round(sig.entry - 3 * risk, dec)
+    )
+    tp3 = sig.tp3 if sig.tp3 and sig.tp3 != sig.tp else (
+        round(sig.entry + 6 * risk, dec) if sig.direction == "LONG"
+        else round(sig.entry - 6 * risk, dec)
+    )
+
+    # Gain potentiel par TP en $
+    def _gain(tp_val: float) -> str:
+        if risk <= 0 or base_lot <= 0:
+            return "—"
+        if sig.direction == "LONG":
+            r = (tp_val - sig.entry) / risk
+        else:
+            r = (sig.entry - tp_val) / risk
+        gain = round(r * 100.0, 0)
+        return f"+${int(gain)}"
+
     if sig.direction == "LONG":
-        tp2 = round(sig.entry + 2.0 * (sig.tp - sig.entry), dec)
-        tp3 = round(sig.entry + 2.5 * (sig.tp - sig.entry), dec)
-        tp1_pct = round((sig.tp   - sig.entry) / sig.entry * 100, 2)
-        tp2_pct = round((tp2      - sig.entry) / sig.entry * 100, 2)
-        tp3_pct = round((tp3      - sig.entry) / sig.entry * 100, 2)
-        sl_pct  = round((sig.sl   - sig.entry) / sig.entry * 100, 2)
-        mom     = "haussier"
-        struct  = "haussière"
+        mom    = "haussier"
+        struct = "haussière"
     else:
-        tp2 = round(sig.entry - 2.0 * (sig.entry - sig.tp), dec)
-        tp3 = round(sig.entry - 2.5 * (sig.entry - sig.tp), dec)
-        tp1_pct = -round((sig.entry - sig.tp) / sig.entry * 100, 2)
-        tp2_pct = -round((sig.entry - tp2)    / sig.entry * 100, 2)
-        tp3_pct = -round((sig.entry - tp3)    / sig.entry * 100, 2)
-        sl_pct  =  round((sig.sl   - sig.entry) / sig.entry * 100, 2)
-        mom     = "baissier"
-        struct  = "baissière"
+        mom    = "baissier"
+        struct = "baissière"
 
     # Nom affichage
     sym_map = {"GC=F": "XAUUSD / GOLD", "SI=F": "XAGUSD / SILVER",
@@ -476,8 +524,6 @@ def tg_format_signal(sig: "Signal", tier: str = "", mode: str = "SMC",
     dir_arrow = "🟢 BUY / LONG" if sig.direction == "LONG" else "🔴 SELL / SHORT"
     num_str   = f"#{signal_num}" if signal_num else ""
 
-    sign = lambda v: f"+{v}" if v > 0 else str(v)
-
     msg = (
         f"<b>⭐ SMC SIGNALS PRO</b>\n"
         f"🟢 <b>NOUVEAU SIGNAL {num_str}</b>\n"
@@ -486,12 +532,12 @@ def tg_format_signal(sig: "Signal", tier: str = "", mode: str = "SMC",
         f"💎  <b>SETUP :</b> {mode}\n"
         f"🎯  <b>DIRECTION :</b> <b>{dir_arrow}</b>\n"
         f"💰  <b>ENTRY :</b> <code>{sig.entry}</code>\n"
+        f"📦  <b>LOT :</b> <code>{base_lot}</code>  <i>(risque $100)</i>\n"
         f"{'─'*30}\n"
-        f"🎯  <b>TP1 :</b> <code>{sig.tp}</code>    <i>({sign(tp1_pct)}%)</i>\n"
-        f"🎯  <b>TP2 :</b> <code>{tp2}</code>    <i>({sign(tp2_pct)}%)</i>\n"
-        f"🎯  <b>TP3 :</b> <code>{tp3}</code>    <i>({sign(tp3_pct)}%)</i>\n"
-        f"🔴  <b>STOP LOSS :</b> <code>{sig.sl}</code>    <i>({sign(sl_pct)}%)</i>\n"
-        f"📊  <b>RISK / REWARD :</b> <b>1 : {sig.rr}</b>\n"
+        f"🎯  <b>TP1 :</b> <code>{sig.tp}</code>  {_rr(sig.tp)}  {_pct(sig.tp)}  <b>{_gain(sig.tp)}</b>\n"
+        f"🚀  <b>TP2 :</b> <code>{tp2}</code>  {_rr(tp2)}  {_pct(tp2)}  <b>{_gain(tp2)}</b>\n"
+        f"💎  <b>TP3 :</b> <code>{tp3}</code>  {_rr(tp3)}  {_pct(tp3)}  <b>{_gain(tp3)}</b>\n"
+        f"🔴  <b>SL :</b> <code>{sig.sl}</code>  {_sl_pct()}  <b>-$100</b>\n"
         f"{'─'*30}\n"
         f"✅ <b>CONFLUENCE SMC VALIDÉE</b>\n"
         f"📈 Momentum {mom} + Structure {struct}\n"
@@ -503,11 +549,12 @@ def tg_format_signal(sig: "Signal", tier: str = "", mode: str = "SMC",
 
 # ── Génération du graphique SMC ────────────────────────────────────────────
 def generate_chart_image(sig: "Signal") -> Optional[str]:
-    """Génère un graphique SMC dark-theme et retourne le chemin /tmp/*.png."""
+    """Génère un graphique SMC dark-theme 8K (7680×4320) et retourne le chemin /tmp/*.png."""
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        import matplotlib.ticker as mticker
         from matplotlib.patches import Rectangle
         from matplotlib.lines  import Line2D
 
@@ -515,141 +562,153 @@ def generate_chart_image(sig: "Signal") -> Optional[str]:
         if df is None or len(df) < 10:
             return None
 
-        df = df.tail(60).reset_index(drop=True)
+        df = df.tail(80).reset_index(drop=True)
         n  = len(df)
 
-        BG = "#0a0c10"; BG2 = "#0d1117"
-        GREEN = "#22c55e"; RED = "#ef4444"
-        BLUE  = "#3b82f6"; PURPLE = "#a855f7"
-        GOLD  = "#f59e0b"; ORANGE = "#f97316"
-        GRAY  = "#64748b"; LGRAY  = "#94a3b8"
-        MONO  = "DejaVu Sans Mono"
+        # ── Palette dark theme ────────────────────────────────
+        BG     = "#0a0c10"; BG2 = "#0d1117"
+        GREEN  = "#22c55e"; RED = "#ef4444"
+        BLUE   = "#3b82f6"; PURPLE = "#a855f7"
+        GOLD   = "#f59e0b"; ORANGE = "#f97316"
+        GRAY   = "#64748b"; LGRAY  = "#94a3b8"
+        MONO   = "DejaVu Sans Mono"
 
-        fig, ax = plt.subplots(figsize=(40, 22), facecolor=BG)
+        # ── Figure 8K : 16×9 @ 480 dpi = 7680×4320 px ───────
+        fig, ax = plt.subplots(figsize=(16, 9), dpi=480, facecolor=BG)
         ax.set_facecolor(BG2)
         for s in ax.spines.values():
-            s.set_color("#1e293b")
+            s.set_color("#1e293b"); s.set_linewidth(0.4)
 
         prices = pd.concat([df["high"], df["low"]])
-        p_min  = prices.min() * 0.9994
-        p_max  = prices.max() * 1.0006
+        p_min  = prices.min() * 0.9992
+        p_max  = prices.max() * 1.0008
 
-        # Grid
+        # ── Grid ─────────────────────────────────────────────
         import numpy as _np
-        for p in _np.linspace(p_min, p_max, 10):
-            ax.axhline(p, color="#1e293b", lw=0.8, ls="--", alpha=0.5)
+        for p in _np.linspace(p_min, p_max, 12):
+            ax.axhline(p, color="#1e293b", lw=0.5, ls="--", alpha=0.6)
 
-        # FVG
+        # ── FVG ───────────────────────────────────────────────
         fvg = sig.fvg_chart
         if fvg and p_min <= fvg.top <= p_max:
             x0 = max(0, fvg.index - 2)
             ax.add_patch(Rectangle((x0, fvg.bottom), n - x0, fvg.top - fvg.bottom,
                 facecolor=BLUE, alpha=0.15, zorder=1))
             ax.add_patch(Rectangle((x0, fvg.bottom), n - x0, fvg.top - fvg.bottom,
-                edgecolor=BLUE, facecolor="none", lw=2, ls="--", alpha=0.6, zorder=2))
-            mid_y = (fvg.top + fvg.bottom) / 2
-            ax.text((x0 + min(x0 + 15, n)) / 2, mid_y, "FVG",
-                color=BLUE, fontsize=22, fontweight="bold", ha="center", va="center",
-                fontfamily=MONO, bbox=dict(fc=BG2, ec=BLUE, boxstyle="round,pad=0.4", alpha=0.9))
+                edgecolor=BLUE, facecolor="none", lw=1.0, ls="--", alpha=0.7, zorder=2))
+            ax.text((x0 + min(x0 + 15, n)) / 2, (fvg.top + fvg.bottom) / 2, "FVG",
+                color=BLUE, fontsize=7, fontweight="bold", ha="center", va="center",
+                fontfamily=MONO, bbox=dict(fc=BG2, ec=BLUE, boxstyle="round,pad=0.3", alpha=0.9))
 
-        # OB
+        # ── OB ────────────────────────────────────────────────
         ob = sig.ob_chart
         if ob and p_min <= ob.top <= p_max:
-            x0  = max(0, ob.index - 2)
-            x1  = min(n, ob.index + 10)
+            x0 = max(0, ob.index - 2); x1 = min(n, ob.index + 12)
             ax.add_patch(Rectangle((x0, ob.bottom), x1 - x0, ob.top - ob.bottom,
                 facecolor=PURPLE, alpha=0.18, zorder=1))
             ax.add_patch(Rectangle((x0, ob.bottom), x1 - x0, ob.top - ob.bottom,
-                edgecolor=PURPLE, facecolor="none", lw=2.5, zorder=2))
-            mid_y = (ob.top + ob.bottom) / 2
-            ax.text((x0 + x1) / 2, mid_y, "OB",
-                color=PURPLE, fontsize=22, fontweight="bold", ha="center", va="center",
-                fontfamily=MONO, bbox=dict(fc=BG2, ec=PURPLE, boxstyle="round,pad=0.4", alpha=0.9))
+                edgecolor=PURPLE, facecolor="none", lw=1.0, zorder=2))
+            ax.text((x0 + x1) / 2, (ob.top + ob.bottom) / 2, "OB",
+                color=PURPLE, fontsize=7, fontweight="bold", ha="center", va="center",
+                fontfamily=MONO, bbox=dict(fc=BG2, ec=PURPLE, boxstyle="round,pad=0.3", alpha=0.9))
 
-        # BOS
+        # ── BOS / CHoCH ───────────────────────────────────────
         if sig.bos_lv and p_min <= sig.bos_lv <= p_max:
-            ax.axhline(sig.bos_lv, color=RED, lw=2.5, ls="--",
+            ax.axhline(sig.bos_lv, color=RED, lw=0.8, ls="--",
                        xmin=0.0, xmax=0.55, zorder=3)
-            ax.text(n * 0.25, sig.bos_lv * (1 + 0.00015), "BOS",
-                color=RED, fontsize=20, fontweight="bold", fontfamily=MONO)
+            ax.text(n * 0.25, sig.bos_lv * (1 + 0.00012), "BOS",
+                color=RED, fontsize=6, fontweight="bold", fontfamily=MONO)
 
-        # CHoCH
         if sig.choch_lv and p_min <= sig.choch_lv <= p_max:
-            ax.axhline(sig.choch_lv, color=ORANGE, lw=2.5, ls=":",
+            ax.axhline(sig.choch_lv, color=ORANGE, lw=0.8, ls=":",
                        xmin=0.50, xmax=0.80, zorder=3)
-            ax.text(n * 0.62, sig.choch_lv * (1 + 0.00015), "CHoCH",
-                color=ORANGE, fontsize=20, fontweight="bold", fontfamily=MONO)
+            ax.text(n * 0.62, sig.choch_lv * (1 + 0.00012), "CHoCH",
+                color=ORANGE, fontsize=6, fontweight="bold", fontfamily=MONO)
 
-        # Niveaux TP / SL / Entry
-        dec = 2 if sig.entry > 100 else 5
-        if sig.direction == "LONG":
-            tp2 = round(sig.entry + 2.0 * (sig.tp - sig.entry), dec)
-            tp3 = round(sig.entry + 2.5 * (sig.tp - sig.entry), dec)
-        else:
-            tp2 = round(sig.entry - 2.0 * (sig.entry - sig.tp), dec)
-            tp3 = round(sig.entry - 2.5 * (sig.entry - sig.tp), dec)
+        # ── TP / SL / Entry — niveaux structurels réels ───────
+        dec  = 2 if sig.entry > 100 else 5
+        risk = abs(sig.entry - sig.sl)
 
-        for price, lbl, col in [
-            (tp3,       f"TP3 {tp3}",         GREEN),
-            (tp2,       f"TP2 {tp2}",         GREEN),
-            (sig.tp,    f"TP1 {sig.tp}",      GREEN),
-            (sig.entry, f"ENTRY {sig.entry}",  GOLD),
-            (sig.sl,    f"SL {sig.sl}",        RED),
-        ]:
+        # TP2 / TP3 : structurels depuis sig, fallback math
+        tp2 = sig.tp2 if (sig.tp2 and sig.tp2 != sig.tp and sig.tp2 > 0) else (
+            round(sig.entry + 3 * risk, dec) if sig.direction == "LONG"
+            else round(sig.entry - 3 * risk, dec))
+        tp3 = sig.tp3 if (sig.tp3 and sig.tp3 != sig.tp and sig.tp3 > 0) else (
+            round(sig.entry + 6 * risk, dec) if sig.direction == "LONG"
+            else round(sig.entry - 6 * risk, dec))
+
+        def _rr_label(tp_val: float) -> str:
+            if risk <= 0: return ""
+            r = (tp_val - sig.entry) / risk if sig.direction == "LONG" \
+                else (sig.entry - tp_val) / risk
+            return f"  1:{round(r,1)}"
+
+        levels = [
+            (tp3,       f"TP3 {tp3}{_rr_label(tp3)}",        GREEN),
+            (tp2,       f"TP2 {tp2}{_rr_label(tp2)}",        GREEN),
+            (sig.tp,    f"TP1 {sig.tp}{_rr_label(sig.tp)}",  "#86efac"),
+            (sig.entry, f"ENTRY {sig.entry}",                  GOLD),
+            (sig.sl,    f"SL   {sig.sl}   -$100",             RED),
+        ]
+        for price, lbl, col in levels:
             if p_min <= price <= p_max:
-                ax.axhline(price, color=col, lw=2.0, ls="--", alpha=0.85,
+                ax.axhline(price, color=col, lw=0.9, ls="--", alpha=0.9,
                            xmin=0.45, zorder=2)
-                ax.text(n - 0.3, price, lbl, color=col, fontsize=18,
+                ax.text(n - 0.2, price, lbl, color=col, fontsize=5.5,
                     va="center", ha="right", fontfamily=MONO,
-                    bbox=dict(fc=BG2, alpha=0.85, pad=2, ec="none"))
+                    bbox=dict(fc=BG2, alpha=0.88, pad=1.5, ec="none"))
 
-        # Flèche d'entrée
-        entry_x = max(n - 12, n // 2)
+        # ── Flèche d'entrée ───────────────────────────────────
+        entry_x  = max(n - 14, n // 2)
         dist     = abs(sig.entry - sig.sl)
-        if sig.direction == "LONG":
-            arr_start = sig.entry - dist * 0.6
-        else:
-            arr_start = sig.entry + dist * 0.6
+        arr_start = sig.entry - dist * 0.6 if sig.direction == "LONG" \
+                    else sig.entry + dist * 0.6
         ax.annotate("", xy=(entry_x, sig.entry), xytext=(entry_x, arr_start),
-            arrowprops=dict(arrowstyle="->", color=GREEN, lw=3.5))
-        ax.text(entry_x, arr_start - (p_max - p_min) * 0.005,
-            "ENTRY", color=GREEN, fontsize=18, ha="center",
-            fontweight="bold", fontfamily=MONO)
+            arrowprops=dict(arrowstyle="->", color=GREEN if sig.direction == "LONG"
+                            else RED, lw=1.5))
+        ax.text(entry_x, arr_start - (p_max - p_min) * 0.004,
+            sig.direction, color=GREEN if sig.direction == "LONG" else RED,
+            fontsize=7, ha="center", fontweight="bold", fontfamily=MONO)
 
-        # Bougies
+        # ── Bougies ───────────────────────────────────────────
+        w = 0.38  # largeur corps
         for i, row in df.iterrows():
             o, h, l, cl = row["open"], row["high"], row["low"], row["close"]
-            up   = cl >= o
-            col  = GREEN if up else RED
-            bh   = max(abs(cl - o), (p_max - p_min) * 0.0008)
-            ax.plot([i, i], [l, h], color=col, lw=2.0, zorder=4)
-            ax.add_patch(Rectangle((i - 0.35, min(cl, o)), 0.7, bh,
-                fc=col if up else "none", ec=col, lw=2.0, zorder=5))
+            up  = cl >= o
+            col = GREEN if up else RED
+            bh  = max(abs(cl - o), (p_max - p_min) * 0.0005)
+            ax.plot([i, i], [l, h], color=col, lw=0.8, zorder=4)
+            ax.add_patch(Rectangle((i - w, min(cl, o)), w * 2, bh,
+                fc=col if up else "none", ec=col, lw=0.8, zorder=5))
 
-        # Titre
+        # ── Titre & watermark ─────────────────────────────────
         sym_display = ({"GC=F": "XAUUSD", "SI=F": "XAGUSD", "BTC-USD": "BTCUSD",
                         "CL=F": "USOIL",  "BZ=F": "UKOIL"}
                        .get(sig.symbol,
                             sig.symbol.replace("=X","").replace("-USD","").replace("^","")))
-        ax.text(0.015, 0.97, f"{sym_display}  •  M15",
-            transform=ax.transAxes, color=LGRAY, fontsize=28,
+        ax.text(0.013, 0.975, f"{sym_display}  •  M15  •  SMC v3",
+            transform=ax.transAxes, color=LGRAY, fontsize=9,
             va="top", fontfamily=MONO, fontweight="bold")
-        ax.text(0.015, 0.91, "Smart Money Concepts",
-            transform=ax.transAxes, color=GRAY, fontsize=20,
-            va="top", fontfamily=MONO)
+        ax.text(0.013, 0.935, f"Score {sig.score}/100  •  {sig.mode}  •  {sig.direction}",
+            transform=ax.transAxes, color=GRAY, fontsize=7, va="top", fontfamily=MONO)
+        ax.text(0.99, 0.015, "@smcsignalspro",
+            transform=ax.transAxes, color="#334155", fontsize=6,
+            va="bottom", ha="right", fontfamily=MONO)
 
-        ax.set_xlim(-1, n + 1)
+        ax.set_xlim(-1, n + 2)
         ax.set_ylim(p_min, p_max)
-        ax.tick_params(colors=GRAY, labelsize=16)
+        ax.tick_params(colors=GRAY, labelsize=5, length=2, width=0.4)
         ax.yaxis.set_visible(False)
         ax.set_xticks([])
 
-        plt.tight_layout(pad=0.6)
+        plt.tight_layout(pad=0.4)
         safe = (sig.symbol.replace("=X","").replace("-","")
                           .replace("^","").replace(".",""))
         path = f"/tmp/smc_{safe}_{int(time.time())}.png"
-        fig.savefig(path, dpi=220, bbox_inches="tight", facecolor=BG)
+        fig.savefig(path, dpi=480, bbox_inches="tight", facecolor=BG,
+                    metadata={"Software": "SMC Signal Engine v3"})
         plt.close(fig)
+        import gc as _gc; _gc.collect()
         return path
 
     except Exception as e:
@@ -680,6 +739,20 @@ def tg_send_photo(image_path: str, caption: str, chat_id: str) -> bool:
 def tg_notify(sig: "Signal", tier: str = "", mode: str = "SMC",
               chat_id: Optional[str] = None) -> None:
     global TELEGRAM_CHAT_ID, TELEGRAM_LEADER_ID
+
+    # ── FLAG GLOBAL — mettre TG_ENABLED = True pour activer l'envoi ──
+    TG_ENABLED = os.environ.get("TG_ENABLED", "false").lower() == "true"
+    if not TG_ENABLED:
+        # Log local uniquement — aucun appel API Telegram
+        num = _next_signal_number()
+        msg = tg_format_signal(sig, tier, mode, signal_num=num)
+        print(c(f"\n  [TG] 🔕 Envoi désactivé (TG_ENABLED=false) — signal #{num} prêt", "yellow"))
+        print(f"  [TG] Preview message :\n{msg[:300]}...")
+        # Génère quand même le graphique pour vérification locale
+        chart_path = generate_chart_image(sig)
+        if chart_path:
+            print(c(f"  [TG] 📊 Graphique 8K généré : {chart_path}", "cyan"))
+        return
 
     # Récupérer l'ID leader si pas encore connu
     if not TELEGRAM_LEADER_ID:
@@ -799,6 +872,8 @@ class Signal:
     ob_chart:   object = field(default=None, repr=False)   # OrderBlock | None
     bos_lv:     float  = 0.0
     choch_lv:   float  = 0.0
+    tp2:        float  = 0.0   # cible structurelle RR5-6 (swing suivant)
+    tp3:        float  = 0.0   # extension max RR8-10 (liquidité majeure)
 
 
 # ═════════════════════════════════════════════════════════════
@@ -2509,9 +2584,9 @@ def compute_sl_tp_v3(
     sd_zone:   Optional[SupplyDemandZone],
     liq_map:   Optional[LiquidityMap],
     symbol:    str = "",
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, float, float]:
     """
-    Entry / SL / TP v3 — utilise les zones institutionnelles réelles.
+    Entry / SL / TP1 / TP2 / TP3 v3+ — cibles structurelles réelles.
 
     ENTRÉE (priorité décroissante) :
       1. Milieu de la zone Supply/Demand
@@ -2522,11 +2597,10 @@ def compute_sl_tp_v3(
       LONG  : sous le bas de la Demand Zone / OB / FVG  + buffer ATR×0.4
       SHORT : au-dessus du haut de la Supply Zone / OB / FVG  + buffer ATR×0.4
 
-    TAKE PROFIT :
-      Priorité 1 : BSL/SSL nearest (liquidité institutionnelle réelle)
-      Priorité 2 : PDH/PDL (previous day high/low)
-      Priorité 3 : prochain swing H/L non cassé
-      Priorité 4 : entry ± ATR × 4 (fallback)
+    TAKE PROFIT (3 niveaux structurels) :
+      TP1 : RR3 min — BSL/SSL nearest ou PDH/PDL ou swing M15
+      TP2 : RR5-6  — swing H/L M15 suivant au-delà de TP1
+      TP3 : RR8-10 — liquidité majeure H4 / swing H4 / extension max
     """
     atr    = (df_m5["high"] - df_m5["low"]).rolling(14).mean().iloc[-1]
     close  = df_m5["close"].iloc[-1]
@@ -2564,57 +2638,107 @@ def compute_sl_tp_v3(
 
     risk = abs(entry - sl)
     if risk <= 0:
-        return entry, sl, entry, 0.0
+        return entry, sl, entry, entry, entry, 0.0
 
-    # ── 3. TAKE PROFIT — liquidité institutionnelle réelle ────
-    tp = None
+    # ── 3. COLLECTE des cibles structurelles réelles ──────────
+    # Tous les niveaux au-delà de entry dans la bonne direction
+    targets: list[float] = []
 
+    # BSL/SSL depuis la liquidity map
     if liq_map is not None:
-        if direction == "LONG" and liq_map.nearest_bsl and liq_map.nearest_bsl > entry + risk:
-            tp = round(liq_map.nearest_bsl, dec)
-        elif direction == "SHORT" and liq_map.nearest_ssl and liq_map.nearest_ssl < entry - risk:
-            tp = round(liq_map.nearest_ssl, dec)
-
-        # PDH/PDL comme TP si plus favorable
-        if direction == "LONG" and liq_map.pdh and liq_map.pdh > entry + risk:
-            if tp is None or liq_map.pdh < tp:  # plus proche = plus conservateur
-                tp = round(liq_map.pdh, dec)
-        elif direction == "SHORT" and liq_map.pdl and liq_map.pdl < entry - risk:
-            if tp is None or liq_map.pdl > tp:
-                tp = round(liq_map.pdl, dec)
-
-    # Fallback : swing H/L sur M15
-    if tp is None:
-        window50 = df_m15.iloc[-50:]
         if direction == "LONG":
-            cands = sorted([
-                window50["high"].iloc[i]
-                for i in range(len(window50) - 2, 0, -1)
-                if window50["high"].iloc[i] > window50["high"].iloc[i-1]
-                   and window50["high"].iloc[i] > window50["high"].iloc[i+1]
-                   and window50["high"].iloc[i] > entry + risk
-            ], reverse=True)
-            tp_nat = cands[-1] if cands else entry + atr * 5
-            tp = round(max(tp_nat, entry + atr * 4), dec)
+            if liq_map.nearest_bsl and liq_map.nearest_bsl > entry + risk:
+                targets.append(liq_map.nearest_bsl)
+            if liq_map.pdh and liq_map.pdh > entry + risk:
+                targets.append(liq_map.pdh)
+            for lvl in (liq_map.bsl_levels or []):
+                if lvl > entry + risk:
+                    targets.append(lvl)
         else:
-            cands = sorted([
-                window50["low"].iloc[i]
-                for i in range(len(window50) - 2, 0, -1)
-                if window50["low"].iloc[i] < window50["low"].iloc[i-1]
-                   and window50["low"].iloc[i] < window50["low"].iloc[i+1]
-                   and window50["low"].iloc[i] < entry - risk
-            ])
-            tp_nat = cands[0] if cands else entry - atr * 5
-            tp = round(min(tp_nat, entry - atr * 4), dec)
+            if liq_map.nearest_ssl and liq_map.nearest_ssl < entry - risk:
+                targets.append(liq_map.nearest_ssl)
+            if liq_map.pdl and liq_map.pdl < entry - risk:
+                targets.append(liq_map.pdl)
+            for lvl in (liq_map.ssl_levels or []):
+                if lvl < entry - risk:
+                    targets.append(lvl)
 
-    # ── 4. RR net ─────────────────────────────────────────────
+    # Swing highs/lows M15
+    window_m15 = df_m15.iloc[-80:]
     if direction == "LONG":
-        gain_net = (tp - entry) - spread
+        for i in range(1, len(window_m15) - 1):
+            h = window_m15["high"].iloc[i]
+            if (h > window_m15["high"].iloc[i-1]
+                    and h > window_m15["high"].iloc[i+1]
+                    and h > entry + risk):
+                targets.append(h)
     else:
-        gain_net = (entry - tp) - spread
+        for i in range(1, len(window_m15) - 1):
+            lo = window_m15["low"].iloc[i]
+            if (lo < window_m15["low"].iloc[i-1]
+                    and lo < window_m15["low"].iloc[i+1]
+                    and lo < entry - risk):
+                targets.append(lo)
+
+    # Trier les cibles du plus proche au plus loin
+    if direction == "LONG":
+        targets = sorted(set(round(t, dec) for t in targets if t > entry + risk))
+    else:
+        targets = sorted(set(round(t, dec) for t in targets if t < entry - risk), reverse=True)
+
+    # ── 4. ASSIGNATION TP1 / TP2 / TP3 ───────────────────────
+    # TP1 = premier niveau structurel réel (RR1 minimum, pas de RR3 imposé)
+    rr1_min = entry + risk * 1.0 if direction == "LONG" else entry - risk * 1.0
+    rr3_min = entry + risk * 3.0 if direction == "LONG" else entry - risk * 3.0
+    rr6_min = entry + risk * 6.0 if direction == "LONG" else entry - risk * 6.0
+
+    if targets:
+        # TP1 : première cible structurelle ≥ RR1 (la plus proche réelle)
+        tp1_cands = [t for t in targets if (t >= rr1_min if direction == "LONG" else t <= rr1_min)]
+        tp1 = round(tp1_cands[0], dec) if tp1_cands else round(rr1_min, dec)
+    else:
+        tp1 = round(rr1_min, dec)
+
+    # TP2 : cible structurelle suivante ≥ RR3, sinon RR3 mathématique
+    if targets:
+        tp2_cands = [t for t in targets if (t >= rr3_min if direction == "LONG" else t <= rr3_min)
+                     and t != tp1]
+        tp2 = round(tp2_cands[0], dec) if tp2_cands else round(rr3_min, dec)
+    else:
+        tp2 = round(rr3_min, dec)
+
+    # TP3 : extension max ≥ RR6 — swing H4 ou liquidité lointaine
+    window_h4 = df_m15.iloc[-200:] if len(df_m15) >= 200 else df_m15
+    tp3 = round(rr6_min, dec)  # fallback RR6
+    if direction == "LONG":
+        far_highs = [
+            window_h4["high"].iloc[i]
+            for i in range(1, len(window_h4) - 1)
+            if window_h4["high"].iloc[i] > window_h4["high"].iloc[i-1]
+               and window_h4["high"].iloc[i] > window_h4["high"].iloc[i+1]
+               and window_h4["high"].iloc[i] >= rr6_min
+        ]
+        if far_highs:
+            tp3 = round(max(far_highs), dec)
+    else:
+        far_lows = [
+            window_h4["low"].iloc[i]
+            for i in range(1, len(window_h4) - 1)
+            if window_h4["low"].iloc[i] < window_h4["low"].iloc[i-1]
+               and window_h4["low"].iloc[i] < window_h4["low"].iloc[i+1]
+               and window_h4["low"].iloc[i] <= rr6_min
+        ]
+        if far_lows:
+            tp3 = round(min(far_lows), dec)
+
+    # ── 5. RR net sur TP1 ─────────────────────────────────────
+    if direction == "LONG":
+        gain_net = (tp1 - entry) - spread
+    else:
+        gain_net = (entry - tp1) - spread
 
     rr_net = round(gain_net / risk, 2) if gain_net > 0 and risk > 0 else 0.0
-    return entry, sl, tp, rr_net
+    return entry, sl, tp1, rr_net, tp2, tp3
 
 
 # ═════════════════════════════════════════════════════════════
@@ -2908,7 +3032,7 @@ def analyse(symbol: str, htf: str = HTF, ltf: str = LTF,
     # ─────────────────────────────────────────────────────────
     ob_for_sl = ob_ltf_match or ob_mtf_match
 
-    entry, sl, tp, rr = compute_sl_tp_v3(
+    entry, sl, tp, rr, tp2, tp3 = compute_sl_tp_v3(
         df_m5     = df_ltf,
         df_m15    = df_mtf,
         direction = direction,
@@ -3033,6 +3157,8 @@ def analyse(symbol: str, htf: str = HTF, ltf: str = LTF,
         ob_chart  = ob_for_sl,
         bos_lv    = _bos_lv,
         choch_lv  = _choch_lv,
+        tp2       = tp2,
+        tp3       = tp3,
     )
 
     if not silent:
@@ -3102,8 +3228,9 @@ TIER_3_EXTRA: list[tuple[str, str]] = [
 CATEGORY_MAP: dict[str, list[tuple[str, str]]] = {
     "priority"  : TIER_1_PRIORITY,
     "btc"       : [("BTC-USD", "Bitcoin")],
-    "forex"     : TIER_2_FOREX,
-    "forex_all" : TIER_2_FOREX + [s for s in TIER_3_EXTRA if "=X" in s[0]],
+    # forex_all inclut toujours Gold + BTC + toutes les paires forex
+    "forex"     : [("GC=F", "Gold"), ("BTC-USD", "Bitcoin")] + TIER_2_FOREX + [s for s in TIER_3_EXTRA if "=X" in s[0]],
+    "forex_all" : [("GC=F", "Gold"), ("BTC-USD", "Bitcoin")] + TIER_2_FOREX + [s for s in TIER_3_EXTRA if "=X" in s[0]],
     "all"       : TIER_1_PRIORITY + TIER_2_FOREX + TIER_3_EXTRA,
 }
 
@@ -3176,10 +3303,12 @@ def setup_logging() -> logging.Logger:
                             datefmt="%Y-%m-%d %H:%M:%S")
     ch = logging.StreamHandler(sys.stdout)
     ch.setFormatter(fmt)
-    fh = logging.FileHandler("smc_v3.log", encoding="utf-8")
-    fh.setFormatter(fmt)
     logger.addHandler(ch)
-    logger.addHandler(fh)
+    # Pas de FileHandler sur Render (économise disque + I/O)
+    if not os.environ.get("RENDER"):
+        fh = logging.FileHandler("smc_v3.log", encoding="utf-8")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
     return logger
 
 
@@ -3187,7 +3316,7 @@ log = setup_logging()
 
 SESSIONS = {"London": (7, 16), "New York": (12, 21)}
 
-MAX_SIGNALS_PER_DAY = 3
+MAX_SIGNALS_PER_DAY = 5
 _daily_count: dict[str, int] = {}
 _daily_date:  str = ""
 _last_bias:   dict[str, str] = {}
@@ -3476,7 +3605,7 @@ def run_live(cat: str = "forex", min_score: int = SCORE_THRESHOLD,
                         "lot"      : sig.lot,
                         "mode"     : sig.mode,
                     })
-                    _STATUS["last_signals"] = _STATUS["last_signals"][-50:]
+                    _STATUS["last_signals"] = _STATUS["last_signals"][-20:]
 
             if not signals_found:
                 print(c(f"  ℹ️  Aucun signal valide (score≥{min_score} + RR≥{min_rr})", "white"))
