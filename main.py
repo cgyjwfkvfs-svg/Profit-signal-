@@ -1,3 +1,4 @@
+
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
 ║         SMC SIGNAL ENGINE  v3  — Smart Money Concepts ELITE             ║
@@ -206,8 +207,8 @@ SD_ZONE_BUFFER       = 0.15  # tolérance 15% de l'ATR pour "dans la zone"
 #  SESSIONS ACTIVES (UTC)
 # ─────────────────────────────────────────────────────────────
 SESSION_WINDOWS_UTC: list[tuple[int, int]] = [
-    (7,  10),   # London open
-    (13, 16),   # NY open + overlap
+    (2,  5),    # Tokyo/Asian open
+    (7,  17),   # London open → NY close (couvre le gap 10h-13h)
 ]
 
 
@@ -263,12 +264,17 @@ def check_volatility(symbol: str, df_ltf: pd.DataFrame) -> tuple[bool, str]:
         return False, "données insuffisantes"
     atr = (df_ltf["high"] - df_ltf["low"]).rolling(14).mean().iloc[-1]
 
-    # ATR dynamique : moyenne 100 bougies × 0.6 (s'adapte aux conditions de marché)
+    # ATR dynamique : moyenne 100 bougies × 0.5
     atr_mean = (df_ltf["high"] - df_ltf["low"]).rolling(100).mean().iloc[-1]
     if not pd.isna(atr_mean) and atr_mean > 0:
-        atr_min = atr_mean * 0.6
+        atr_min = atr_mean * 0.5
     else:
-        atr_min = ATR_MIN.get(symbol, ATR_MIN_DEFAULT) * 0.7
+        # Fallback : pour BTC/crypto, seuil relatif au prix (0.12%)
+        close = df_ltf["close"].iloc[-1]
+        if is_crypto_symbol(symbol) and close > 0:
+            atr_min = close * 0.0012
+        else:
+            atr_min = ATR_MIN.get(symbol, ATR_MIN_DEFAULT) * 0.7
 
     spread = get_spread(symbol)
     if atr < atr_min:
@@ -3435,7 +3441,7 @@ def _reasons_flags(reasons: list[str]) -> tuple[str, str, str, str, str]:
 #  BOUCLE LIVE PRINCIPALE
 # ─────────────────────────────────────────────────────────────
 
-def run_live(cat: str = "forex", min_score: int = SCORE_THRESHOLD,
+def run_live(cat: str = "all", min_score: int = SCORE_THRESHOLD,
              min_rr: float = MIN_RR, interval: int = 30) -> None:
     """
     Boucle principale VPS — scan continu toutes les {interval}s.
@@ -3713,14 +3719,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--symbol",    default=None,
                         help="Symbole unique  (ex: BTC-USD, GC=F, EURUSD=X)")
-    parser.add_argument("--cat",       default="forex",
+    parser.add_argument("--cat",       default="all",
                         choices=["priority", "btc", "forex", "forex_all", "all"],
                         help=(
                             "priority  = Gold + BTC\n"
                             "btc       = BTC uniquement\n"
-                            "forex     = Forex majeures (défaut)\n"
+                            "forex     = Forex + Gold + BTC\n"
                             "forex_all = Forex complet\n"
-                            "all       = Tout scanner"
+                            "all       = Tout scanner (défaut)\n"
                         ))
     parser.add_argument("--scan",      action="store_true",
                         help="Scan unique (test local)")
@@ -3753,4 +3759,3 @@ if __name__ == "__main__":
     else:
         run_live(cat=args.cat, min_score=args.min_score,
                  min_rr=args.min_rr, interval=args.interval)
-
