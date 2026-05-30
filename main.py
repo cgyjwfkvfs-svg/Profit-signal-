@@ -52,12 +52,24 @@ import pandas as pd
 import yfinance as yf
 import json as _json
 
-# Deriv WebSocket API — pip install websocket-client
+# Deriv WebSocket API — auto-install si manquant
 try:
     import websocket as _websocket_lib
     _WEBSOCKET_OK = True
 except ImportError:
-    _WEBSOCKET_OK = False
+    import subprocess as _subprocess, sys as _sys
+    print("  [DERIV] websocket-client manquant — installation automatique…")
+    try:
+        _subprocess.check_call(
+            [_sys.executable, "-m", "pip", "install", "websocket-client", "--quiet"],
+            timeout=60
+        )
+        import websocket as _websocket_lib
+        _WEBSOCKET_OK = True
+        print("  [DERIV] ✅ websocket-client installé avec succès")
+    except Exception as _e:
+        print(f"  [DERIV] ❌ Impossible d'installer websocket-client : {_e}")
+        _WEBSOCKET_OK = False
 
 # ── Flask — serveur HTTP pour Render ─────────────────────────
 from flask import Flask, jsonify
@@ -1151,7 +1163,6 @@ def fetch_deriv(symbol: str, interval: str, period: str = "5d") -> pd.DataFrame:
         "count":         count,
         "granularity":   gran,
         "style":         "candles",
-        "subscribe":     0,
     })
 
     try:
